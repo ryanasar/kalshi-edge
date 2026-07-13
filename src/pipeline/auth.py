@@ -26,9 +26,6 @@ Setup:
     pip install cryptography requests
     export KALSHI_API_KEY_ID="your-key-id-uuid"
     export KALSHI_PRIVATE_KEY_PATH="./secrets/kalshi_private_key.pem"
-
-Run the credential smoke test:
-    python auth.py
 """
 
 from __future__ import annotations
@@ -58,8 +55,6 @@ CANDIDATE_HOSTS = [
     "https://trading-api.kalshi.com",
     "https://api.kalshi.com",
 ]
-
-DEMO_HOST = "https://demo-api.kalshi.co"  # sandbox; separate credentials
 
 
 class KalshiAuthError(RuntimeError):
@@ -185,68 +180,3 @@ class KalshiClient:
             json=json,
             timeout=timeout,
         )
-
-
-# --- Credential smoke test ----------------------------------------------------
-
-
-def smoke_test() -> None:
-    """
-    Probes each candidate host with an AUTHENTICATED endpoint.
-
-    /portfolio/balance specifically, NOT /markets. /markets is public — it
-    returns 200 even with a garbage signature, so it proves nothing. Only an
-    endpoint that REQUIRES auth can tell you your signature was accepted.
-
-    A balance of 0 is a pass. You're testing the handshake, not your account.
-    """
-    print("Probing hosts with GET /portfolio/balance ...\n")
-
-    for host in CANDIDATE_HOSTS:
-        try:
-            client = KalshiClient.from_env(host)
-            resp = client.request("GET", "/portfolio/balance")
-        except requests.exceptions.RequestException as e:
-            print(f"  {host:<40} CONNECTION FAILED ({type(e).__name__})")
-            continue
-
-        print(f"  {host:<40} HTTP {resp.status_code}")
-
-        if resp.status_code == 200:
-            print(f"\n{'=' * 70}")
-            print("AUTHENTICATED. Signature accepted.")
-            print(f"  Working host: {host}")
-            print(f"  Response:     {resp.text}")
-            print(f"{'=' * 70}")
-            print("\nHardcode that host, delete the other candidates, and move on")
-            print("to GET /markets?series_ticker=KXFED to confirm live field names")
-            print("and the dollar-string price format.")
-            return
-
-        if resp.status_code == 401:
-            print(f"      -> reachable, but signature REJECTED: {resp.text[:200]}")
-        elif resp.status_code == 404:
-            print("      -> wrong host or wrong API prefix (not a crypto problem)")
-
-    print(f"\n{'=' * 70}")
-    print("NO HOST AUTHENTICATED.")
-    print(f"{'=' * 70}")
-    print(
-        "\nDistinguish the two failure classes first:\n"
-        "  - 404 / connection error  = the HOST is wrong. Your crypto is untested.\n"
-        "  - 401                     = you reached Kalshi; your SIGNATURE was rejected.\n"
-        "\nIf you got a 401, check in this order:\n"
-        "  1. Timestamp in MILLISECONDS (time.time() * 1000), not seconds.\n"
-        "  2. Signed path includes '/trade-api/v2' and EXCLUDES the '?query'.\n"
-        "  3. salt_length is PSS.DIGEST_LENGTH, not PSS.MAX_LENGTH.\n"
-        "  4. KALSHI_API_KEY_ID matches the key whose PRIVATE half you loaded.\n"
-        "     (Mismatched pairs are common if you've regenerated keys.)\n"
-        "  5. System clock isn't skewed. The timestamp is inside the signature and\n"
-        "     Kalshi compares it to THEIR clock — a few seconds of drift and every\n"
-        "     signature you produce is rejected as stale, even with perfect code.\n"
-        "\nIf every host 404'd, check docs.kalshi.com for the current base URL.\n"
-    )
-
-
-if __name__ == "__main__":
-    smoke_test()

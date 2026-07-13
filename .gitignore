@@ -1,0 +1,12 @@
+secrets/
+.env
+*.pem
+node_modules/
+.venv/
+CLAUDE.md
+docker-compose.yml
+db/
+outputs/
+scripts/
+__pycache__/
+*.pyc
