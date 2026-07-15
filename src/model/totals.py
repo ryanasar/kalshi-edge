@@ -68,16 +68,16 @@ def _pf(s: str) -> float:
     return float(s) if s not in ("", None) else np.nan
 
 
-def load_features_totals(path: str) -> dict:
-    """Load feature LEVELS + the total_runs label. Drops rows with no
-    total_runs (the one unlabeled tie)."""
+def load_features_totals(path: str, label: str = "total_runs") -> dict:
+    """Load feature LEVELS + the runs label (`total_runs` for full game,
+    `f5_runs` for first-5). Drops rows with no label."""
     X, y, season, game_pk = [], [], [], []
     with open(path, newline="") as f:
         for row in csv.DictReader(f):
-            if row["total_runs"] in ("", None):
+            if row[label] in ("", None):
                 continue
             X.append([_pf(row[c]) for c in LEVEL_COLUMNS])
-            y.append(int(row["total_runs"]))
+            y.append(int(row[label]))
             season.append(int(row["official_date"][:4]))
             game_pk.append(int(row["game_pk"]))
     return {
@@ -164,8 +164,9 @@ def p_over(mu: np.ndarray, r: float, line: np.ndarray) -> np.ndarray:
 # --- market side -------------------------------------------------------------
 
 
-# Every KXMLBTOTAL line for 2026 games, priced at first pitch (same honest
-# horizon as the moneyline overlay — never at close/settlement).
+# Every over/under line for 2026 games, priced at first pitch (same honest
+# horizon as the moneyline overlay — never at close/settlement). The series
+# (KXMLBTOTAL full game / KXMLBF5TOTAL first-5) is a bound parameter.
 TOTALS_MARKET_SQL = """
 SELECT
     l.game_pk,
@@ -175,7 +176,7 @@ SELECT
 FROM games g
 JOIN market_game_link l ON l.game_pk = g.game_pk
 JOIN markets m ON m.ticker = l.ticker
-    AND m.series_ticker = 'KXMLBTOTAL'
+    AND m.series_ticker = %(series)s
     AND m.status = 'finalized'
     AND m.result IN ('yes', 'no')
     AND m.floor_strike IS NOT NULL
@@ -189,15 +190,14 @@ JOIN LATERAL (
 ) c ON TRUE
 WHERE g.status = 'Final'
   AND g.official_date >= '2026-01-01'
-  AND g.total_runs IS NOT NULL
   AND c.yes_bid_close IS NOT NULL
   AND c.yes_ask_close IS NOT NULL
 """
 
 
-def fetch_totals_markets() -> list[dict]:
+def fetch_totals_markets(series: str = "KXMLBTOTAL") -> list[dict]:
     with connect() as conn, conn.cursor() as cur:
-        cur.execute(TOTALS_MARKET_SQL)
+        cur.execute(TOTALS_MARKET_SQL, {"series": series})
         return [{"game_pk": int(gp), "line": float(ln),
                  "mkt_prob": float(mp), "outcome": int(o)}
                 for gp, ln, mp, o in cur.fetchall()]
@@ -210,10 +210,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--features", default="outputs/features_moneyline.csv")
     parser.add_argument("--bins", type=int, default=10)
+    parser.add_argument("--f5", action="store_true",
+                        help="First-5-innings totals (KXMLBF5TOTAL / f5_runs)")
     args = parser.parse_args()
 
-    data = load_features_totals(args.features)
-    print(f"loaded {len(data['y'])} games "
+    label = "f5_runs" if args.f5 else "total_runs"
+    series = "KXMLBF5TOTAL" if args.f5 else "KXMLBTOTAL"
+    variant = "First-5 Totals" if args.f5 else "Total Runs"
+    out_name = ("calibration_f5totals_vs_market.png" if args.f5
+                else "calibration_totals_vs_market.png")
+
+    data = load_features_totals(args.features, label)
+    print(f"[{variant}] loaded {len(data['y'])} games "
           f"(2024={int((data['season']==2024).sum())}, "
           f"2025={int((data['season']==2025).sum())}, "
           f"2026={int((data['season']==2026).sum())})")
@@ -241,11 +249,11 @@ def main() -> None:
     implied_var = mu_test.mean() + mu_test.mean() ** 2 / r_disp
     print("\n=== Layer 2: negative-binomial dispersion ===")
     print(f"  fitted r = {r_disp:.3f}   (implied var at μ̄: {implied_var:.2f}, "
-          f"actual total-runs var ≈ 20.0)")
+          f"actual label var: {y_test.var():.2f})")
 
     # Layer 3 + market comparison -----------------------------------------
     mu_by_game = {int(g): float(m) for g, m in zip(hold["game_pk_test"], mu_test)}
-    markets = [mk for mk in fetch_totals_markets() if mk["game_pk"] in mu_by_game]
+    markets = [mk for mk in fetch_totals_markets(series) if mk["game_pk"] in mu_by_game]
 
     model_p = np.array([p_over(mu_by_game[mk["game_pk"]], r_disp, mk["line"])
                         for mk in markets])
@@ -267,10 +275,10 @@ def main() -> None:
 
     model_bins = compute_bins(model_p, outcomes, args.bins)
     market_bins = compute_bins(market_p, outcomes, args.bins)
-    out_path = OUT_DIR / "calibration_totals_vs_market.png"
+    out_path = OUT_DIR / out_name
     plot_overlay(model_bins, market_bins, model_brier, market_brier,
                  len(markets), out_path,
-                 title="Total Runs — Model vs Market Calibration",
+                 title=f"{variant} — Model vs Market Calibration",
                  xlabel="Predicted P(over line)", unit="markets")
     print(f"\n  saved overlay → {out_path}")
 

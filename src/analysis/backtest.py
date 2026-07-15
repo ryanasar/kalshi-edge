@@ -231,7 +231,7 @@ SELECT l.game_pk, g.official_date, m.floor_strike,
        CASE WHEN m.result = 'yes' THEN 1 ELSE 0 END AS outcome
 FROM games g
 JOIN market_game_link l ON l.game_pk = g.game_pk
-JOIN markets m ON m.ticker = l.ticker AND m.series_ticker = 'KXMLBTOTAL'
+JOIN markets m ON m.ticker = l.ticker AND m.series_ticker = %(series)s
     AND m.status = 'finalized' AND m.result IN ('yes', 'no')
     AND m.floor_strike IS NOT NULL
 JOIN LATERAL (
@@ -245,7 +245,7 @@ WHERE g.status = 'Final' AND g.official_date >= '2026-01-01'
 """
 
 
-def _mu_offsets(window_days: int = 45) -> dict[int, float]:
+def _mu_offsets(label: str = "total_runs", window_days: int = 45) -> dict[int, float]:
     """
     PIT season-drift correction for the totals estimator. It's trained on
     2024-25 and systematically under-predicts the higher-scoring 2026
@@ -257,11 +257,11 @@ def _mu_offsets(window_days: int = 45) -> dict[int, float]:
     rows = []
     with open(FEATURES, newline="") as f:
         for r in csv.DictReader(f):
-            if r["total_runs"] in ("", None):
+            if r[label] in ("", None):
                 continue
             rows.append((int(r["game_pk"]),
                          date.fromisoformat(r["official_date"]),
-                         int(r["total_runs"])))
+                         int(r[label])))
 
     train_mean = float(np.mean([tr for _, d, tr in rows if d.year < 2026]))
     dates = np.array([d for _, d, _ in rows])
@@ -277,20 +277,21 @@ def _mu_offsets(window_days: int = 45) -> dict[int, float]:
     return offsets
 
 
-def totals_markets(recalibrate: bool = True) -> list[dict]:
-    data = tot.load_features_totals(FEATURES)
+def totals_markets(recalibrate: bool = True, label: str = "total_runs",
+                   series: str = "KXMLBTOTAL") -> list[dict]:
+    data = tot.load_features_totals(FEATURES, label)
     best_alpha, _ = tot.season_forward_tune(data)
     hold = tot.fit_and_predict_holdout(data, best_alpha)
     r_disp = tot.fit_dispersion(hold["y_fit"], hold["mu_fit"])
     mu = {int(g): float(m) for g, m in zip(hold["game_pk_test"], hold["mu_test"])}
 
     if recalibrate:
-        offsets = _mu_offsets()
+        offsets = _mu_offsets(label)
         mu = {g: m + offsets.get(g, 0.0) for g, m in mu.items()}
 
     out = []
     with connect() as conn, conn.cursor() as cur:
-        cur.execute(TOTALS_MKT_SQL)
+        cur.execute(TOTALS_MKT_SQL, {"series": series})
         for gp, d, line, bid, ask, outcome in cur.fetchall():
             if int(gp) in mu:
                 p = float(tot.p_over(np.array([mu[int(gp)]]), r_disp,
@@ -340,8 +341,12 @@ def main() -> None:
     print(f"selection: {'NET-EV (fee-aware)' if fee_aware else 'gross edge'}"
           f"   max_spread: {args.max_spread}"
           f"   totals μ recal: {not args.no_recal}")
-    books = {"MONEYLINE": moneyline_markets(),
-             "TOTALS": totals_markets(recalibrate=not args.no_recal)}
+    recal = not args.no_recal
+    books = {
+        "MONEYLINE": moneyline_markets(),
+        "TOTALS":    totals_markets(recal, "total_runs", "KXMLBTOTAL"),
+        "TOTALS_F5": totals_markets(recal, "f5_runs", "KXMLBF5TOTAL"),
+    }
 
     # Threshold sweep — taker-net P&L/ROI/bets as selectivity rises.
     print("\n" + "=" * 60)
