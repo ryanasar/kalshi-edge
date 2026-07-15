@@ -62,7 +62,7 @@ PER_SIDE_KEYS: list[str] = PITCHER_KEYS + OFF_KEYS   # 9 features per team
 # near-zero means "trust the imputed league average, not this noisy line."
 OUTPUT_COLUMNS: list[str] = (
     ["game_pk", "official_date", "home_team_code", "away_team_code",
-     "is_home_winner", "home_pp_id", "away_pp_id"]
+     "is_home_winner", "total_runs", "f5_runs", "home_pp_id", "away_pp_id"]
     + [f"home_{k}" for k in PER_SIDE_KEYS]
     + [f"away_{k}" for k in PER_SIDE_KEYS]
     + ["home_pp_pas", "away_pp_pas"]
@@ -137,6 +137,8 @@ def assemble_game(conn, game: dict, off_table: TeamOffenseTable,
         "home_team_code": game["home_team_code"],
         "away_team_code": game["away_team_code"],
         "is_home_winner": game["is_home_winner"],
+        "total_runs":     game["total_runs"],
+        "f5_runs":        game["f5_runs"],
         "home_pp_id":     game["home_probable_pitcher_id"],
         "away_pp_id":     game["away_probable_pitcher_id"],
         "home_pp_pas":    home_form.pas if home_form else 0,
@@ -158,7 +160,8 @@ def assemble_game(conn, game: dict, off_table: TeamOffenseTable,
 
 GAMES_SQL = """
 SELECT game_pk, official_date, home_team_code, away_team_code,
-       home_probable_pitcher_id, away_probable_pitcher_id, is_home_winner
+       is_home_winner, total_runs, f5_runs,
+       home_probable_pitcher_id, away_probable_pitcher_id
 FROM games
 WHERE status = 'Final'
   AND (%(start)s::date IS NULL OR official_date >= %(start)s)
@@ -169,8 +172,8 @@ ORDER BY official_date, game_pk
 
 def _fetch_games(conn, start: date | None, end: date | None) -> list[dict]:
     cols = ["game_pk", "official_date", "home_team_code", "away_team_code",
-            "home_probable_pitcher_id", "away_probable_pitcher_id",
-            "is_home_winner"]
+            "is_home_winner", "total_runs", "f5_runs",
+            "home_probable_pitcher_id", "away_probable_pitcher_id"]
     with conn.cursor() as cur:
         cur.execute(GAMES_SQL, {"start": start, "end": end})
         return [dict(zip(cols, r)) for r in cur.fetchall()]

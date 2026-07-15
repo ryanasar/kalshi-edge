@@ -104,7 +104,10 @@ def fetch_market_probs() -> dict[int, float]:
 
 
 def plot_overlay(model_bins, market_bins, model_brier, market_brier,
-                 n: int, out_path: Path) -> None:
+                 n: int, out_path: Path,
+                 title: str = "Moneyline — Model vs Market Calibration",
+                 xlabel: str = "Predicted P(home win)",
+                 unit: str = "games") -> None:
     fig, ax = plt.subplots(figsize=(7, 7))
     ax.plot([0, 1], [0, 1], "--", color="gray", alpha=0.6,
             label="Perfect calibration")
@@ -126,10 +129,9 @@ def plot_overlay(model_bins, market_bins, model_brier, market_brier,
 
     ax.set_xlim(-0.02, 1.02)
     ax.set_ylim(-0.02, 1.02)
-    ax.set_xlabel("Predicted P(home win)")
-    ax.set_ylabel("Realized frequency of home win (empirical)")
-    ax.set_title(f"Moneyline — Model vs Market Calibration\n"
-                 f"2026 holdout, N = {n} games (95% Wilson CI)")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel("Realized frequency (empirical)")
+    ax.set_title(f"{title}\n2026 holdout, N = {n} {unit} (95% Wilson CI)")
     ax.legend(loc="upper left")
     ax.grid(alpha=0.3)
     ax.set_aspect("equal")
