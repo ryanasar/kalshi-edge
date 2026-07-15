@@ -217,16 +217,29 @@ def ingest_date(target: date, verbose: bool = True) -> tuple[int, int]:
     for day in body.get("dates", []):
         games.extend(day.get("games", []))
 
+    # Keep only regular-season games. The schedule endpoint also returns
+    # the All-Star Game (gameType 'A'), spring training ('S'), and
+    # postseason ('D'/'L'/'W'/'F'). The All-Star Game carries synthetic
+    # "team" ids (159 = AL All-Stars, 160 = NL) that aren't in the 30-club
+    # abbreviation map, so reaching _team_code with one raises KeyError and
+    # kills the entire backfill mid-July every season. Filtering to 'R'
+    # both fixes that and keeps the label universe aligned with the
+    # Statcast feature window, which is already fetched with hfGT=R.
+    reg_games = [g for g in games if g.get("gameType") == "R"]
+    skipped = len(games) - len(reg_games)
+
     upserted = 0
     with connect() as conn:
-        for g in games:
+        for g in reg_games:
             row = _game_to_row(g)
             if upsert_game(conn, row):
                 upserted += 1
         conn.commit()
 
     if verbose:
-        print(f"  {target.isoformat()}: fetched={len(games)}  upserted={upserted}")
+        extra = f"  skipped_non_R={skipped}" if skipped else ""
+        print(f"  {target.isoformat()}: fetched={len(games)}  "
+              f"upserted={upserted}{extra}")
     return (len(games), upserted)
 
 

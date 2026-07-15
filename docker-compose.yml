@@ -1,0 +1,75 @@
+# docker-compose.yml
+#
+# Local development stack for kalshi-edge. Right now: just Postgres.
+#
+# Bring up:      docker compose up -d
+# Tear down:     docker compose down          (keeps data)
+# Tear down + wipe data: docker compose down -v
+# Watch logs:    docker compose logs -f db
+# Shell into DB: docker compose exec db psql -U kalshi -d kalshi_edge
+
+services:
+  db:
+    # `postgres:16` pins the MAJOR version. Not `latest` (breaks silently on
+    # upgrade) and not `16.2.3` (too rigid — we want auto-applied security
+    # patches within 16.x). This is the industry norm for pinning.
+    image: postgres:16
+
+    # Explicit name so `docker exec kalshi-edge-db ...` has a stable target.
+    # Without this Docker generates something like `kalshi-edge-db-1`, which
+    # is fine but shifts if the compose file is renamed.
+    container_name: kalshi-edge-db
+
+    # `unless-stopped` = restart automatically if the container crashes or
+    # if Docker Desktop restarts, but NOT if you deliberately `docker stop`
+    # it. This is the right default for a local dev DB — you get resilience
+    # without fighting the container when you explicitly want it off.
+    restart: unless-stopped
+
+    environment:
+      # The postgres image reads these on first launch to bootstrap the DB.
+      # After the volume is populated they're ignored — changing the
+      # password here later has NO effect. You'd have to wipe the volume.
+      POSTGRES_DB: kalshi_edge
+      POSTGRES_USER: kalshi
+      # Local-dev-only password. Hardcoded here on purpose: this file is
+      # under git, and pretending a local dev password is a secret costs
+      # more than it protects. In production this comes from a secrets
+      # manager (Vault, AWS Secrets Manager, etc.) via env var.
+      POSTGRES_PASSWORD: kalshi_local_dev
+
+    ports:
+      # host:container. Exposing 5432 on localhost so Python running on the
+      # host machine (i.e. our ingestion code) can connect to the DB inside
+      # the container as if it were installed natively. If you already have
+      # Postgres on your Mac using 5432, change the LEFT side (e.g. 5433:5432).
+      - "5433:5432"
+
+    volumes:
+      # Named volume for the DB's data directory. This is why the DB
+      # survives `docker compose down` — the volume is separate from the
+      # container. Wiping it requires `docker compose down -v` explicitly.
+      #
+      # If we used a bind mount here (./pgdata:/var/lib/postgresql/data)
+      # the data would live inside our repo, which sounds convenient until
+      # you accidentally commit gigabytes of DB files. Named volume is the
+      # correct choice.
+      - kalshi_edge_data:/var/lib/postgresql/data
+
+    healthcheck:
+      # `pg_isready` returns 0 when Postgres can accept connections. Postgres
+      # takes a few seconds to initialize on first launch; this lets Docker
+      # know when it's actually up (vs. just "container is running").
+      # Later, when we add an ingestion service that depends on the DB, it
+      # can wait on this healthcheck instead of racing the DB startup.
+      test: ["CMD-SHELL", "pg_isready -U kalshi -d kalshi_edge"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  # Declared here so Docker manages its lifecycle. Data lives at
+  # /var/lib/docker/volumes/kalshi-edge_kalshi_edge_data/_data on the host,
+  # but you should never touch it directly — always go through
+  # `docker compose` or `docker volume` commands.
+  kalshi_edge_data:

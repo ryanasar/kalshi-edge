@@ -194,6 +194,10 @@ def compute_bins(
 def plot_calibration(
     bins: list[dict], brier: float, n_total: int, out_path: Path,
     title_suffix: str = "pooled",
+    title_prefix: str = "Kalshi Market Calibration",
+    point_label: str = "Kalshi market (95% Wilson CI)",
+    point_color: str = "tab:blue",
+    xlabel: str = "Market implied probability (predicted)",
 ) -> None:
     fig, ax = plt.subplots(figsize=(7, 7))
 
@@ -219,8 +223,8 @@ def plot_calibration(
             centers, emp,
             yerr=[yerr_lo, yerr_hi],
             fmt="o", markersize=7, capsize=4, linewidth=1.5,
-            color="tab:blue", ecolor="tab:blue", alpha=0.85,
-            label="Kalshi market (95% Wilson CI)",
+            color=point_color, ecolor=point_color, alpha=0.85,
+            label=point_label,
         )
 
         # Per-bin sample counts annotate the points. A bin with n=2 with
@@ -231,10 +235,10 @@ def plot_calibration(
 
     ax.set_xlim(-0.02, 1.02)
     ax.set_ylim(-0.02, 1.02)
-    ax.set_xlabel("Market implied probability (predicted)")
+    ax.set_xlabel(xlabel)
     ax.set_ylabel("Realized frequency of YES (empirical)")
     ax.set_title(
-        f"Kalshi Market Calibration — {title_suffix}\n"
+        f"{title_prefix} — {title_suffix}\n"
         f"N = {n_total}    Brier = {brier:.4f}"
     )
     ax.legend(loc="upper left")

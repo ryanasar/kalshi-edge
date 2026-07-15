@@ -1,12 +1,23 @@
-secrets/
+# --- Secrets & credentials (never commit) ---
 .env
+secrets/
 *.pem
-node_modules/
-.venv/
+
+# --- Local project notes (kept out of the public portfolio repo) ---
 CLAUDE.md
-docker-compose.yml
-db/
-outputs/
-scripts/
+
+# --- Python ---
 __pycache__/
 *.pyc
+.venv/
+
+# --- Node ---
+node_modules/
+
+# --- Generated outputs (regenerable: plots, logs, data dumps) ---
+outputs/
+
+# --- OS / editor cruft ---
+.DS_Store
+*.log
+.vscode/
