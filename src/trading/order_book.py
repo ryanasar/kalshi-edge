@@ -38,13 +38,19 @@ ONE = Decimal("1")
 
 
 class OrderBook:
-    def __init__(self, ticker: str):
+    def __init__(self, ticker: str, check_seq: bool = True):
         self.ticker = ticker
         # price(Decimal) -> resting size(Decimal), one dict per ladder.
         self.yes: dict[Decimal, Decimal] = {}
         self.no: dict[Decimal, Decimal] = {}
         self.seq: int | None = None
         self.last_ts_ms: int | None = None
+        # Gap detection only makes sense on a SINGLE-market subscription,
+        # where `seq` is a clean 1,2,3… sequence. On a multi-market
+        # subscription Kalshi's `seq` is a GLOBAL per-connection counter, so
+        # each market sees a sparse slice of it and every delta would look
+        # like a gap — recorders set check_seq=False and apply unconditionally.
+        self.check_seq = check_seq
 
     # --- frame application ----------------------------------------------------
 
@@ -64,7 +70,7 @@ class OrderBook:
 
         if typ == "orderbook_delta":
             seq = frame.get("seq")
-            if self.seq is not None and seq != self.seq + 1:
+            if self.check_seq and self.seq is not None and seq != self.seq + 1:
                 return False  # gap — book can no longer be trusted
             self._apply_delta(msg)
             self.seq = seq

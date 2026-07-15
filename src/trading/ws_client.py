@@ -62,53 +62,78 @@ def _handshake_headers(client: KalshiClient) -> dict[str, str]:
 
 
 def _discover_open_market(client: KalshiClient, prefer: str = "KXMLB") -> str | None:
-    """Find a currently-open market to subscribe to. Prefer MLB; fall back
-    to any open market so we can still exercise the WS plumbing off-season."""
-    resp = client.request("GET", "/markets", params={"status": "open", "limit": 200})
+    """Find an ACTIVE open market to subscribe to — highest volume, so it
+    actually streams book updates (a random open market can be dead silent).
+    Prefer MLB if any MLB market has volume; else the busiest market overall."""
+    resp = client.request("GET", "/markets", params={"status": "open", "limit": 1000})
     resp.raise_for_status()
     markets = resp.json().get("markets", [])
     if not markets:
         return None
+    markets.sort(key=lambda m: m.get("volume", 0) or 0, reverse=True)
     mlb = [m for m in markets if m.get("ticker", "").startswith(prefer)]
-    chosen = (mlb or markets)[0]
-    print(f"  discovered {len(markets)} open markets "
-          f"({len(mlb)} {prefer}*); using {chosen['ticker']}")
+    chosen = mlb[0] if (mlb and (mlb[0].get("volume") or 0) > 0) else markets[0]
+    print(f"  {len(markets)} open markets; picking busiest "
+          f"{prefer if chosen in mlb else ''} market {chosen['ticker']} "
+          f"(volume {chosen.get('volume', 0)})")
     return chosen["ticker"]
+
+
+def _discover_active_markets(client: KalshiClient, n: int = 100) -> list[str]:
+    """Return up to n open-market tickers. Volume in the list view is
+    unreliable (often 0), so we just take a broad batch and let the WS tell
+    us which are actually streaming — subscribing wide is how a real watcher
+    catches activity anyway."""
+    resp = client.request("GET", "/markets", params={"status": "open", "limit": 1000})
+    resp.raise_for_status()
+    tickers = [m["ticker"] for m in resp.json().get("markets", [])]
+    print(f"  discovered {len(tickers)} open markets; subscribing to {min(n, len(tickers))}")
+    return tickers[:n]
+
+
+def _subscribe_cmd(tickers: list[str], channels) -> dict:
+    return {"id": 1, "cmd": "subscribe",
+            "params": {"channels": list(channels), "market_tickers": list(tickers)}}
+
+
+async def stream_session(client: KalshiClient, tickers: list[str],
+                         channels=("orderbook_delta", "ticker")):
+    """
+    One WS session: connect, subscribe to all tickers, and yield parsed
+    frames until the connection closes. Deliberately does NOT reconnect —
+    the caller owns the reconnect loop, so it can also force a resubscribe on
+    a sequence gap (which needs a fresh snapshot, not just a reconnect).
+    """
+    headers = _handshake_headers(client)
+    async with websockets.connect(WS_HOST + WS_PATH, additional_headers=headers,
+                                  ssl=_SSL_CTX) as ws:
+        # One subscribe PER MARKET. Kalshi's `seq` is per-subscription, so a
+        # shared multi-market subscription makes each market see a
+        # non-consecutive slice of one global counter — which looks like a
+        # constant gap. Separate subscriptions give each market its own sid
+        # and its own clean 1,2,3… sequence.
+        for i, ticker in enumerate(tickers):
+            await ws.send(json.dumps({"id": i + 1, "cmd": "subscribe",
+                                      "params": {"channels": list(channels),
+                                                 "market_tickers": [ticker]}}))
+        async for raw in ws:
+            try:
+                yield json.loads(raw)
+            except json.JSONDecodeError:
+                continue
 
 
 async def dump(ticker: str, seconds: int) -> None:
     client = KalshiClient.from_env(REST_HOST)
-    headers = _handshake_headers(client)
-    uri = WS_HOST + WS_PATH
-
-    print(f"connecting to {uri} ...")
-    async with websockets.connect(uri, additional_headers=headers,
-                                  ssl=_SSL_CTX) as ws:
-        print("  connected. subscribing to orderbook_delta + ticker ...")
-        sub = {
-            "id": 1,
-            "cmd": "subscribe",
-            "params": {
-                "channels": ["orderbook_delta", "ticker"],
-                "market_tickers": [ticker],
-            },
-        }
-        await ws.send(json.dumps(sub))
-
-        deadline = asyncio.get_event_loop().time() + seconds
-        count = 0
-        while asyncio.get_event_loop().time() < deadline:
-            try:
-                raw = await asyncio.wait_for(ws.recv(), timeout=deadline - asyncio.get_event_loop().time())
-            except asyncio.TimeoutError:
-                break
-            count += 1
-            # Pretty-print so we can read the schema off the wire.
-            try:
-                print(f"[{count:>3}] {json.dumps(json.loads(raw))}")
-            except (json.JSONDecodeError, TypeError):
-                print(f"[{count:>3}] {raw!r}")
-        print(f"\ndone. received {count} frames in {seconds}s.")
+    print(f"connecting to {WS_HOST + WS_PATH} ...")
+    count = 0
+    start = time.monotonic()
+    async for frame in stream_session(client, [ticker]):
+        count += 1
+        print(f"[{count:>3}] {json.dumps(frame)}")
+        if time.monotonic() - start >= seconds:
+            break
+    print(f"\ndone. received {count} frames.")
 
 
 def main() -> None:
