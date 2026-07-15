@@ -45,24 +45,26 @@ from datetime import date
 
 from src.pipeline.db import connect
 from src.features.pitcher_form import PitcherForm, pitcher_recent_form
+from src.features.team_offense import TeamOffenseTable
+from src.features.team_offense import FEATURE_KEYS as OFF_KEYS
 
 
-# The v1 moneyline feature set — five starting-pitcher primitives (§5.5).
-# Platoon splits and team-offense features are intentionally out of scope
-# until the calibration curve shows they're needed (complexity discovered,
-# not chosen — §5.5).
-FEATURE_KEYS: list[str] = ["k_pct", "bb_pct", "hr_per_9", "xwoba_bip", "avg_velo"]
+# Per-side feature families (§5.5). Five starting-pitcher primitives plus
+# four team-offense primitives. Column names never collide: offense keys
+# carry the `off_` prefix (off_k_pct vs the pitcher's k_pct).
+PITCHER_KEYS: list[str] = ["k_pct", "bb_pct", "hr_per_9", "xwoba_bip", "avg_velo"]
+PER_SIDE_KEYS: list[str] = PITCHER_KEYS + OFF_KEYS   # 9 features per team
 
-# Full output column order. Metadata + label first, then the raw per-side
-# pitcher features, then sample-size context the model layer may turn into
-# a low-confidence flag. `home_pp_pas` / `away_pp_pas` are the plate
-# appearances backing each form vector — near-zero means "trust the
-# imputed league average, not this pitcher's noisy season-to-date line."
+# Full output column order. Metadata + label first, then ALL home features
+# then ALL away features (so the model layer can split at the midpoint to
+# form home−away differentials), then sample-size context. `home_pp_pas` /
+# `away_pp_pas` are the plate appearances backing each pitcher-form vector —
+# near-zero means "trust the imputed league average, not this noisy line."
 OUTPUT_COLUMNS: list[str] = (
     ["game_pk", "official_date", "home_team_code", "away_team_code",
      "is_home_winner", "home_pp_id", "away_pp_id"]
-    + [f"home_{k}" for k in FEATURE_KEYS]
-    + [f"away_{k}" for k in FEATURE_KEYS]
+    + [f"home_{k}" for k in PER_SIDE_KEYS]
+    + [f"away_{k}" for k in PER_SIDE_KEYS]
     + ["home_pp_pas", "away_pp_pas"]
 )
 
@@ -89,11 +91,11 @@ def season_to_date_lookback(official_date: date) -> int:
 
 
 def _extract(form: PitcherForm | None) -> dict[str, float | None]:
-    """Pull the v1 feature keys off a PitcherForm. None form (unknown or
-    missing pitcher) → all-None, to be imputed downstream."""
+    """Pull the pitcher feature keys off a PitcherForm. None form (unknown
+    or missing pitcher) → all-None, to be imputed downstream."""
     if form is None:
-        return {k: None for k in FEATURE_KEYS}
-    return {k: getattr(form, k) for k in FEATURE_KEYS}
+        return {k: None for k in PITCHER_KEYS}
+    return {k: getattr(form, k) for k in PITCHER_KEYS}
 
 
 def _form_for(conn, pitcher_id: int | None, as_of: date,
@@ -108,7 +110,8 @@ def _form_for(conn, pitcher_id: int | None, as_of: date,
     )
 
 
-def assemble_game(conn, game: dict, lookback_days: int | None = None) -> dict:
+def assemble_game(conn, game: dict, off_table: TeamOffenseTable,
+                  lookback_days: int | None = None) -> dict:
     """
     Build the feature row for a single game dict (keys per GAMES_SQL below).
 
@@ -118,9 +121,15 @@ def assemble_game(conn, game: dict, lookback_days: int | None = None) -> dict:
     """
     official_date: date = game["official_date"]
     lb = season_to_date_lookback(official_date) if lookback_days is None else lookback_days
+    season_start = _season_start(official_date)
 
     home_form = _form_for(conn, game["home_probable_pitcher_id"], official_date, lb)
     away_form = _form_for(conn, game["away_probable_pitcher_id"], official_date, lb)
+
+    # Team offense is season-to-date (not a rolling window) and read from the
+    # precomputed table — same PIT cutoff, official_date exclusive.
+    home_off = off_table.as_of(game["home_team_code"], official_date, season_start)
+    away_off = off_table.as_of(game["away_team_code"], official_date, season_start)
 
     row: dict = {
         "game_pk":        game["game_pk"],
@@ -133,9 +142,14 @@ def assemble_game(conn, game: dict, lookback_days: int | None = None) -> dict:
         "home_pp_pas":    home_form.pas if home_form else 0,
         "away_pp_pas":    away_form.pas if away_form else 0,
     }
+    # Pitcher-form features (home_* / away_*).
     for side, form in (("home", home_form), ("away", away_form)):
         for k, v in _extract(form).items():
             row[f"{side}_{k}"] = v
+    # Team-offense features (home_off_* / away_off_*).
+    for side, off in (("home", home_off), ("away", away_off)):
+        for k in OFF_KEYS:
+            row[f"{side}_{k}"] = off[k]
     return row
 
 
@@ -168,7 +182,8 @@ def assemble(conn, start: date | None = None, end: date | None = None,
     """Assemble feature rows for every Final game in [start, end]. Costs two
     index-backed aggregate queries per game (home + away starter)."""
     games = _fetch_games(conn, start, end)
-    rows = [assemble_game(conn, g, lookback_days) for g in games]
+    off_table = TeamOffenseTable.build(conn)   # one scan, reused for all games
+    rows = [assemble_game(conn, g, off_table, lookback_days) for g in games]
     if verbose:
         _print_summary(rows)
     return rows
@@ -189,10 +204,10 @@ def _print_summary(rows: list[dict]) -> None:
           f"(home wins {home_wins} = {home_wins / len(labeled):.3f})")
 
     print("  missing rate per feature (both sides):")
-    for k in FEATURE_KEYS:
+    for k in PER_SIDE_KEYS:
         miss = sum(1 for r in rows for side in ("home", "away")
                    if r[f"{side}_{k}"] is None)
-        print(f"    {k:<12} {miss / (2 * n):6.3f}")
+        print(f"    {k:<14} {miss / (2 * n):6.3f}")
 
 
 def _write_csv(rows: list[dict], path: str) -> None:
