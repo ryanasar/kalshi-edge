@@ -34,7 +34,9 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import csv
 import math
+from datetime import date, timedelta
 from pathlib import Path
 
 import matplotlib
@@ -69,20 +71,39 @@ def _fee(rate: float, price: float) -> float:
 # --- one market → one (or zero) trade ----------------------------------------
 
 
-def _trade(m: dict, threshold: float) -> dict | None:
+def _trade(m: dict, threshold: float, fee_aware: bool = True,
+           max_spread: float | None = None) -> dict | None:
     """
     Decide the trade for one market and return per-bracket P&L, or None if
-    the edge is inside the spread.
+    the edge doesn't clear the bar.
 
     m keys: model_prob, yes_bid, yes_ask, outcome (0/1), date.
+
+    fee_aware=True  → the trigger is expected NET edge (gross minus the taker
+                      fee we'd pay), so we never take a trade whose entire
+                      gross edge is smaller than the fee. This is the
+                      principled version of "raise the threshold": it prunes
+                      guaranteed net losers instead of guessing a cutoff.
+    max_spread      → skip markets wider than this (dead/illiquid books whose
+                      taker cost is unwinnable).
     """
     p, bid, ask, y = m["model_prob"], m["yes_bid"], m["yes_ask"], m["outcome"]
 
-    if p - ask > threshold:
+    if max_spread is not None and (ask - bid) > max_spread:
+        return None
+
+    # Gross edge on each side, then (optionally) net of the taker fee we'd pay.
+    yes_edge = p - ask
+    no_edge = bid - p
+    if fee_aware:
+        yes_edge -= _fee(TAKER_FEE, ask)
+        no_edge -= _fee(TAKER_FEE, 1.0 - bid)
+
+    if yes_edge > threshold:
         # Long YES. Taker pays the ask; maker rests at the bid (earns spread).
         taker_price, maker_price = ask, bid
         payoff = y                      # YES pays $1 iff outcome == 1
-    elif bid - p > threshold:
+    elif no_edge > threshold:
         # Long NO. Taker pays 1−bid; maker buys NO at 1−ask (rests, earns spread).
         taker_price, maker_price = 1.0 - bid, 1.0 - ask
         payoff = 1 - y                  # NO pays $1 iff outcome == 0
@@ -106,8 +127,10 @@ def _trade(m: dict, threshold: float) -> dict | None:
 # --- aggregate a set of trades into a report ---------------------------------
 
 
-def summarize(markets: list[dict], threshold: float) -> dict:
-    trades = [t for t in (_trade(m, threshold) for m in markets) if t]
+def summarize(markets: list[dict], threshold: float, fee_aware: bool = True,
+              max_spread: float | None = None) -> dict:
+    trades = [t for t in (_trade(m, threshold, fee_aware, max_spread)
+                          for m in markets) if t]
     n = len(trades)
     if n == 0:
         return {"n_markets": len(markets), "n_bets": 0}
@@ -141,8 +164,9 @@ def summarize(markets: list[dict], threshold: float) -> dict:
     }
 
 
-def _print_report(name: str, markets: list[dict], threshold: float) -> dict:
-    s = summarize(markets, threshold)
+def _print_report(name: str, markets: list[dict], threshold: float,
+                  fee_aware: bool = True, max_spread: float | None = None) -> dict:
+    s = summarize(markets, threshold, fee_aware, max_spread)
     print(f"\n=== {name}  (edge threshold θ = {threshold:.2f}) ===")
     if s["n_bets"] == 0:
         print(f"  no bets: 0 of {s['n_markets']} markets cleared the threshold")
@@ -221,12 +245,48 @@ WHERE g.status = 'Final' AND g.official_date >= '2026-01-01'
 """
 
 
-def totals_markets() -> list[dict]:
+def _mu_offsets(window_days: int = 45) -> dict[int, float]:
+    """
+    PIT season-drift correction for the totals estimator. It's trained on
+    2024-25 and systematically under-predicts the higher-scoring 2026
+    environment (μ̄ 8.81 vs actual 9.03). For each 2026 game we shift μ by
+    (trailing-window league-mean total runs BEFORE that date) − (training
+    mean). Uses only games strictly earlier than the game, so it's leak-free
+    — exactly how you'd recalibrate online as a season unfolds.
+    """
+    rows = []
+    with open(FEATURES, newline="") as f:
+        for r in csv.DictReader(f):
+            if r["total_runs"] in ("", None):
+                continue
+            rows.append((int(r["game_pk"]),
+                         date.fromisoformat(r["official_date"]),
+                         int(r["total_runs"])))
+
+    train_mean = float(np.mean([tr for _, d, tr in rows if d.year < 2026]))
+    dates = np.array([d for _, d, _ in rows])
+    totals_arr = np.array([tr for _, _, tr in rows])
+
+    offsets: dict[int, float] = {}
+    for gp, d, _ in rows:
+        if d.year != 2026:
+            continue
+        mask = (dates >= d - timedelta(days=window_days)) & (dates < d)
+        offsets[gp] = (float(totals_arr[mask].mean()) - train_mean
+                       if mask.sum() >= 20 else 0.0)
+    return offsets
+
+
+def totals_markets(recalibrate: bool = True) -> list[dict]:
     data = tot.load_features_totals(FEATURES)
     best_alpha, _ = tot.season_forward_tune(data)
     hold = tot.fit_and_predict_holdout(data, best_alpha)
     r_disp = tot.fit_dispersion(hold["y_fit"], hold["mu_fit"])
     mu = {int(g): float(m) for g, m in zip(hold["game_pk_test"], hold["mu_test"])}
+
+    if recalibrate:
+        offsets = _mu_offsets()
+        mu = {g: m + offsets.get(g, 0.0) for g, m in mu.items()}
 
     out = []
     with connect() as conn, conn.cursor() as cur:
@@ -266,11 +326,22 @@ def plot_equity(summaries: dict[str, dict], threshold: float, out_path: Path) ->
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--threshold", type=float, default=0.00,
-                        help="Edge threshold for the detailed report")
+                        help="Extra edge threshold on top of the selection rule")
+    parser.add_argument("--max-spread", type=float, default=None,
+                        help="Skip markets with bid/ask spread wider than this")
+    parser.add_argument("--gross-select", action="store_true",
+                        help="Select on GROSS edge (old behavior) instead of net-EV")
+    parser.add_argument("--no-recal", action="store_true",
+                        help="Disable the totals μ season-drift recalibration")
     args = parser.parse_args()
 
+    fee_aware = not args.gross_select
     print("training models and pulling first-pitch prices...")
-    books = {"MONEYLINE": moneyline_markets(), "TOTALS": totals_markets()}
+    print(f"selection: {'NET-EV (fee-aware)' if fee_aware else 'gross edge'}"
+          f"   max_spread: {args.max_spread}"
+          f"   totals μ recal: {not args.no_recal}")
+    books = {"MONEYLINE": moneyline_markets(),
+             "TOTALS": totals_markets(recalibrate=not args.no_recal)}
 
     # Threshold sweep — taker-net P&L/ROI/bets as selectivity rises.
     print("\n" + "=" * 60)
@@ -280,7 +351,7 @@ def main() -> None:
         print(f"\n{name}:")
         print(f"  {'θ':>6}{'bets':>7}{'P&L':>10}{'ROI':>9}{'t-stat':>8}")
         for th in THRESHOLD_SWEEP:
-            s = summarize(mk, th)
+            s = summarize(mk, th, fee_aware, args.max_spread)
             if s["n_bets"]:
                 print(f"  {th:>6.2f}{s['n_bets']:>7}{s['taker_net']:>+10.2f}"
                       f"{s['taker_net'] / s['cost'] * 100:>8.1f}%{s['tstat']:>+8.2f}")
@@ -291,7 +362,8 @@ def main() -> None:
     print("\n" + "=" * 60)
     print(f"DETAILED REPORT  (θ = {args.threshold:.2f})")
     print("=" * 60)
-    summaries = {name: _print_report(name, mk, args.threshold)
+    summaries = {name: _print_report(name, mk, args.threshold, fee_aware,
+                                     args.max_spread)
                  for name, mk in books.items()}
 
     out_path = OUT_DIR / "backtest_equity.png"
