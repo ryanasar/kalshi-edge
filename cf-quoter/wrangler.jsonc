@@ -1,0 +1,18 @@
+{
+  // Kalshi liquidity-incentive quoter — a single always-on Durable Object that
+  // rests a two-sided quote at best price in ONE market and re-quotes on an
+  // alarm loop, to farm the Liquidity Incentive Program. Real money.
+  "name": "kalshi-quoter",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "durable_objects": {
+    "bindings": [{ "name": "QUOTER", "class_name": "QuoterDO" }]
+  },
+  // SQLite-backed DO storage (required for the state that must survive evictions).
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["QuoterDO"] }],
+  "observability": { "enabled": true }
+  // Secrets (set via `wrangler secret put` for prod; .dev.vars for local dev):
+  //   KALSHI_API_KEY_ID       — the key-id UUID
+  //   KALSHI_PRIVATE_KEY_B64  — PKCS#8 DER, base64 (single line)
+  //   CONTROL_TOKEN           — bearer token gating the control HTTP API
+}
