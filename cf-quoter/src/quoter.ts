@@ -133,8 +133,10 @@ export class QuoterDO extends DurableObject<Env> {
         s.cycles++;
         if (s.bid && s.ask && fp(s.bid.price) === fp(q.bid) && fp(s.ask.price) === fp(q.ask)) s.atBest++;
         if (pnl <= -s.maxLoss) { await this.doStop(s, `killswitch pnl=${pnl.toFixed(2)}`); return; }
-        await this.requote(k, s, "bid", s.position < s.maxPosition, q.bid);
-        await this.requote(k, s, "ask", s.position > -s.maxPosition, q.ask);
+        // Pass the ROOM on each side (contracts until the ±cap), so requote can
+        // size the order down and a full fill can never breach maxPosition.
+        await this.requote(k, s, "bid", s.maxPosition - s.position, q.bid);
+        await this.requote(k, s, "ask", s.maxPosition + s.position, q.ask);
       }
       await this.ctx.storage.put("state", s);
       await this.ctx.storage.setAlarm(Date.now() + s.pollSeconds * 1000);
@@ -175,14 +177,19 @@ export class QuoterDO extends DurableObject<Env> {
     console.log(`FILL ${tag} ${n}@${price} -> pos=${s.position} cash=${s.cash.toFixed(4)}`);
   }
 
-  private async requote(k: Kalshi, s: State, tag: "bid" | "ask", want: boolean, price: string): Promise<void> {
+  // `room` = contracts allowed on this side before hitting the ±maxPosition cap.
+  // We quote min(size, room), so even a full fill can't breach the cap — this is
+  // the fix for the 53-vs-40 overshoot (the old code checked the cap but still
+  // placed a full-size order, so effective cap was maxPosition + size).
+  private async requote(k: Kalshi, s: State, tag: "bid" | "ask", room: number, price: string): Promise<void> {
+    const want = Math.min(s.size, Math.max(0, room));
     const o = s[tag];
-    if (!want) { if (o) { await k.cancel(o.id); s[tag] = null; } return; }
-    if (o && fp(o.price) === fp(price)) return; // already at best — keep queue priority
+    if (want <= 0) { if (o) { await k.cancel(o.id); s[tag] = null; } return; }
+    if (o && fp(o.price) === fp(price) && o.rem <= room) return; // at best & can't breach — keep it
     if (o) { await k.cancel(o.id); s[tag] = null; }
     try {
-      const id = await k.restLimit(s.ticker, tag, fp(price), s.size, true);
-      s[tag] = { id, price: fp(price), rem: s.size };
+      const id = await k.restLimit(s.ticker, tag, fp(price), want, true);
+      s[tag] = { id, price: fp(price), rem: want };
     } catch (e) {
       console.log(`skip ${tag}@${price}: ${(e as Error).message}`); // post_only rejected a racing quote
     }
