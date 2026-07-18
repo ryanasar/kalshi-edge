@@ -72,12 +72,33 @@ export class QuoterDO extends DurableObject<Env> {
     return this.k;
   }
 
+  // Resting orders for THIS DO's market only. The exchange returns every order
+  // on the account, but with one DO per ticker we must never touch another
+  // market's orders — the whole point of per-ticker scoping. Every place that
+  // cancels or flat-checks goes through this filter.
+  private async myOrders(k: Kalshi, ticker: string): Promise<any[]> {
+    return (await k.restingOrders()).filter(
+      (o) => (o.ticker ?? o.market_ticker) === ticker,
+    );
+  }
+
   // --- control (RPC) ------------------------------------------------------
   async start(cfg: StartConfig): Promise<object> {
     const k = await this.kalshi();
-    if ((await k.restingOrders()).length) throw new Error("account has resting orders — not flat");
+    // Flat-check is PER TICKER now: another market's resting orders are none of
+    // this DO's business (the old account-wide check made simultaneous markets
+    // impossible — the second start() always saw the first market's orders).
+    if ((await this.myOrders(k, cfg.ticker)).length) throw new Error(`resting orders already in ${cfg.ticker}`);
     const pos = await k.positions(cfg.ticker);
     if (pos.some((p) => Number(p.position ?? 0) !== 0)) throw new Error(`open position in ${cfg.ticker}`);
+
+    // Buying-power guard: the $147 account is SHARED across every market, so a
+    // new market must not commit more than the account can currently cover.
+    // Worst case this market holds a full one-sided position of `maxPosition`
+    // contracts (~$1 each), so require at least that much free balance now.
+    const need = cfg.maxPosition ?? 4;
+    const bal = Number(await k.balanceDollars());
+    if (bal < need) throw new Error(`balance $${bal.toFixed(2)} < ~$${need} needed for maxPosition ${need}`);
 
     const minutes = cfg.minutes ?? 180;
     const s: State = {
@@ -201,7 +222,10 @@ export class QuoterDO extends DurableObject<Env> {
     s.running = false; s.stopReason = reason;
     console.log(`STOP (${reason}) — flattening`);
     try {
-      for (const o of await k.restingOrders()) await k.cancel(o.order_id ?? o.id).catch(() => {});
+      // Cancel ONLY this market's resting orders. The old code cancelled every
+      // order on the account, so one market stopping would wipe out every OTHER
+      // market's quotes — the cross-DO bug that made multi-market unsafe.
+      for (const o of await this.myOrders(k, s.ticker)) await k.cancel(o.order_id ?? o.id).catch(() => {});
       s.bid = s.ask = null;
       if (s.position !== 0) {
         const q = await k.bestQuote(s.ticker);
@@ -219,6 +243,9 @@ export class QuoterDO extends DurableObject<Env> {
     } finally {
       await this.ctx.storage.deleteAlarm();
       await this.ctx.storage.put("state", s);
+      // Drop ourselves from the live-market registry so a self-stop (deadline or
+      // kill-switch) doesn't leave a zombie entry that /status keeps polling.
+      await this.env.REGISTRY.getByName("registry").remove(s.ticker).catch(() => {});
     }
   }
 }
