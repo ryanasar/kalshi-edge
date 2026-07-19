@@ -94,8 +94,12 @@ export class QuoterDO extends DurableObject<Env> {
     // this DO's business (the old account-wide check made simultaneous markets
     // impossible — the second start() always saw the first market's orders).
     if ((await this.myOrders(k, cfg.ticker)).length) throw new Error(`resting orders already in ${cfg.ticker}`);
+    // Kalshi returns the signed contract count as `position_fp` (a string) — NOT
+    // `position` (which doesn't exist, so reading it silently sees 0 and would let
+    // us start ON TOP of an open position). This is the field bug that left run-1
+    // econ positions orphaned; the flat-check must read position_fp.
     const pos = await k.positions(cfg.ticker);
-    if (pos.some((p) => Number(p.position ?? 0) !== 0)) throw new Error(`open position in ${cfg.ticker}`);
+    if (pos.some((p) => Number(p.position_fp ?? p.position ?? 0) !== 0)) throw new Error(`open position in ${cfg.ticker}`);
 
     // Buying-power guard: the $147 account is SHARED across every market, so a
     // new market must not commit more than the account can currently cover.
