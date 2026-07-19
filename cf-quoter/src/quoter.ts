@@ -25,6 +25,11 @@ import { Kalshi, fp } from "./kalshi";
 import type { Env } from "./index";
 
 const MAKER_RATE = 0.0175;
+// v2 position-skew: once |inventory| reaches this fraction of maxPosition, start
+// improving the REDUCING side by one tick so the position works back to flat
+// instead of pinning at the cap (§ v2 learnings — the USPPIYOY pin).
+const SKEW_SOFT_FRAC = 0.6;
+const TICK = 0.01;
 
 interface Leg { id: string; price: string; rem: number; }
 interface State {
@@ -154,10 +159,22 @@ export class QuoterDO extends DurableObject<Env> {
         s.cycles++;
         if (s.bid && s.ask && fp(s.bid.price) === fp(q.bid) && fp(s.ask.price) === fp(q.ask)) s.atBest++;
         if (pnl <= -s.maxLoss) { await this.doStop(s, `killswitch pnl=${pnl.toFixed(2)}`); return; }
+        // Position-skew the PRICES. Below the soft threshold both sides sit at
+        // best (symmetric — capture spread + subsidy). Past it, improve the
+        // reducing side by one tick to become the new best there, so it gets
+        // filled and unwinds inventory (a resting quote AT best didn't fill and
+        // pinned us last run). The one-tick improve is clamped so it can never
+        // cross the book (post_only would reject a cross anyway), so on a 1¢
+        // market it simply stays at best. Maker-only — no taker fee.
+        let bidPx = Number(q.bid), askPx = Number(q.ask);
+        if (Math.abs(s.position) >= s.maxPosition * SKEW_SOFT_FRAC) {
+          if (s.position > 0) askPx = Math.max(bidPx + TICK, askPx - TICK);      // long → cheaper ask, sell down
+          else if (s.position < 0) bidPx = Math.min(askPx - TICK, bidPx + TICK); // short → richer bid, buy back
+        }
         // Pass the ROOM on each side (contracts until the ±cap), so requote can
         // size the order down and a full fill can never breach maxPosition.
-        await this.requote(k, s, "bid", s.maxPosition - s.position, q.bid);
-        await this.requote(k, s, "ask", s.maxPosition + s.position, q.ask);
+        await this.requote(k, s, "bid", s.maxPosition - s.position, fp(bidPx));
+        await this.requote(k, s, "ask", s.maxPosition + s.position, fp(askPx));
       }
       await this.ctx.storage.put("state", s);
       await this.ctx.storage.setAlarm(Date.now() + s.pollSeconds * 1000);

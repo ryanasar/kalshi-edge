@@ -157,6 +157,21 @@ def proximity_mult(hours_to_close: float) -> float:
 
 
 # --- helpers ----------------------------------------------------------------
+def _get(client: KalshiClient, endpoint: str, params: dict | None = None, tries: int = 3):
+    """GET with retries — the local link to Kalshi times out intermittently, and
+    a broad scan shouldn't die on one transient blip. Returns the Response or
+    None if every attempt failed."""
+    import time as _t
+    for i in range(tries):
+        try:
+            return client.request("GET", endpoint, params=params or {})
+        except Exception:
+            if i == tries - 1:
+                return None
+            _t.sleep(1.0 * (i + 1))
+    return None
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -215,8 +230,9 @@ def fetch_active_programs(client: KalshiClient) -> list[dict]:
         params = {"limit": 200}
         if cursor:
             params["cursor"] = cursor
-        r = client.request("GET", "/incentive_programs", params=params)
-        r.raise_for_status()
+        r = _get(client, "/incentive_programs", params)
+        if r is None or not r.ok:
+            break
         d = r.json()
         for p in d.get("incentive_programs", []):
             if p.get("incentive_type") != "liquidity" or p.get("paid_out"):
@@ -237,8 +253,8 @@ def _band_sides(client: KalshiClient, ticker: str) -> tuple[float, float]:
     PER SIDE — (yes-bid side, yes-ask side). Per-side is the point: a market can
     be crowded overall yet have one thin side we can dominate (the TOM book was
     180k on the bid vs 1.1k on the ask). Only used with --deep (extra call)."""
-    r = client.request("GET", f"/markets/{ticker}/orderbook", params={"depth": 30})
-    if not r.ok:
+    r = _get(client, f"/markets/{ticker}/orderbook", {"depth": 30})
+    if r is None or not r.ok:
         return 0.0, 0.0
 
     def band(levels) -> float:
@@ -262,8 +278,8 @@ def enrich(client: KalshiClient, prog: dict, capital: float, deep: bool,
     """Join one program to its live market and compute the economics. Returns
     None if the market is untradeable right now (no two-sided quote / closed)."""
     ticker = prog["market_ticker"]
-    r = client.request("GET", f"/markets/{ticker}")
-    if not r.ok:
+    r = _get(client, f"/markets/{ticker}")
+    if r is None or not r.ok:
         return None
     m = r.json().get("market", {})
     if m.get("status") != "active":
