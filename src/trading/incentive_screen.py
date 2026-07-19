@@ -130,8 +130,12 @@ _TOX_RULES: list[tuple[str, str]] = [
     ("RETAIL SALES", "STABLE"), ("JOBLESS", "STABLE"), ("UNEMPLOYMENT", "STABLE"),
     ("PRICE IN JULY", "STABLE"), ("HOURLY PRICE", "STABLE"), ("NET WORTH", "STABLE"),
     ("FEAR & GREED", "STABLE"),
-    # slow-moving / martingale
-    ("BITCOIN", "MILD"), ("BTC", "MILD"), ("DXY", "MILD"),
+    # DRIFTING markets (§5f) — continuously reprice with live/accumulating data,
+    # so a resting quote gets trend-run-over (market-making death). Treat as toxic.
+    ("KXUSFLYCAN", "EVENT"), ("CANCELLATIONS", "EVENT"), ("KXBTCVSGOLD", "EVENT"),
+    ("OUTPERFORM", "EVENT"), ("VS. GOLD", "EVENT"),
+    # crypto/martingale — drifts continuously; MM loses to the walk
+    ("BITCOIN", "EVENT"), ("BTC", "EVENT"), ("DXY", "MILD"),
 ]
 
 
