@@ -114,6 +114,13 @@ _TOX_RULES: list[tuple[str, str]] = [
     ("NOMINEE", "EVENT"), ("PRIMARY", "EVENT"), ("ELIMINATION", "EVENT"),
     ("DEBUT DATE", "EVENT"), ("METACRITIC", "EVENT"), ("ROTTEN TOMATOES", "EVENT"),
     ("FEATURED ON", "EVENT"), ("ELECTION", "EVENT"), ("RATE DECISION", "EVENT"),
+    # news/entertainment/political jumps that leaked as MILD in the first passes
+    ("KXEOWEEK", "EVENT"), ("EXECUTIVE ORDER", "EVENT"), ("KXLOVEISLAND", "EVENT"),
+    ("LOVE ISLAND", "EVENT"), ("KXDWTS", "EVENT"), ("KXNBATEAMANNOUNCE", "EVENT"),
+    ("KXNBANEXTTEAMCONF", "EVENT"), ("JOINING", "EVENT"), ("KXAPRPOTUS", "EVENT"),
+    ("APPROVAL", "EVENT"), ("KXGENERICBALLOT", "EVENT"), ("GENERIC BALLOT", "EVENT"),
+    ("VOTEHUB", "EVENT"), ("KXROLEINPRODUCTION", "EVENT"), ("PERFORM AS", "EVENT"),
+    ("ROLE IN", "EVENT"), ("NEXT CONFERENCE", "EVENT"),
     # scheduled macro/data prints — flat until a known release time (farmable;
     # the resolution-proximity multiplier separately haircuts the endgame).
     ("KXCPI", "STABLE"), ("KXPPI", "STABLE"), ("KXCPICORE", "STABLE"),
