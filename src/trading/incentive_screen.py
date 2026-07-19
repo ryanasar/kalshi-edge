@@ -219,6 +219,7 @@ class Candidate:
     sub_per_day: float    # capped by hours_left
     roi_per_hr: float     # sub_per_hr / capital, capital-efficiency tiebreak
     score: float          # ranking key = sub_per_hr (already risk-adjusted)
+    open_interest: float  # OI — liquidity to unwind against (concentration input)
 
 
 # --- program ingestion ------------------------------------------------------
@@ -339,6 +340,7 @@ def enrich(client: KalshiClient, prog: dict, capital: float, deep: bool,
         target=target, discount=discount, price=round(price, 3), spread=spread_c,
         bid_side=round(bid_side, 0), ask_side=round(ask_side, 0),
         thin_side=round(thin_side, 0), lopsided=round(lopsided, 1),
+        open_interest=_num(m.get("open_interest_fp")),
         our_size=round(our_size, 1),
         our_share=round(our_share, 4), toxicity=tox, tox_mult=tox_mult,
         prox_mult=prox, sub_per_hr=round(sub_per_hr, 4),
