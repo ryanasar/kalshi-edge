@@ -109,7 +109,8 @@ def main() -> None:
     ap.add_argument("--target", type=float, default=1000.0)
     args = ap.parse_args()
     obs = json.load(open(args.json)) if args.json else RUN1
-    print(f"OBSERVATIONS: {len(obs)} rows"
+    obs = [o for o in obs if o.get("payout") is not None]  # skip not-yet-settled rows
+    print(f"OBSERVATIONS: {len(obs)} settled rows"
           f"{' (run-1 seed)' if not args.json else ''}\n")
     cross_sectional(obs, args.target)
     longitudinal(obs, args.target)
