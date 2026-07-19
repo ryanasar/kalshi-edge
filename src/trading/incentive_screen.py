@@ -121,6 +121,16 @@ _TOX_RULES: list[tuple[str, str]] = [
     ("APPROVAL", "EVENT"), ("KXGENERICBALLOT", "EVENT"), ("GENERIC BALLOT", "EVENT"),
     ("VOTEHUB", "EVENT"), ("KXROLEINPRODUCTION", "EVENT"), ("PERFORM AS", "EVENT"),
     ("ROLE IN", "EVENT"), ("NEXT CONFERENCE", "EVENT"),
+    # ACCUMULATING-COUNT markets (§5f DRIFT): a running count of discrete events
+    # over an OPEN window trends up continuously → market-making death. Match on
+    # count NOUNS/tickers, NOT bare "at least"/"between" (those also match
+    # scheduled single-VALUE data ranges like "unemployment at least 4%"). The
+    # discriminator is "counting events" vs "one measured value".
+    ("HOW MANY", "EVENT"), ("ENDORSE", "EVENT"), ("TRUTH SOCIAL", "EVENT"),
+    ("TRUTH POSTS", "EVENT"), ("POSTS THIS", "EVENT"), ("TWEET", "EVENT"),
+    ("PHOTOGRAPHED", "EVENT"), ("PRESIDENTIAL ACTION", "EVENT"),
+    ("KXTRUMPACT", "EVENT"), ("KXTRUMPENDORSE", "EVENT"), ("KXTRUTHSOCIAL", "EVENT"),
+    ("KXTRUMPPHOTO", "EVENT"), ("KXTRUMPMENTION", "EVENT"), ("KXTRUMPTRUTH", "EVENT"),
     # scheduled macro/data prints — flat until a known release time (farmable;
     # the resolution-proximity multiplier separately haircuts the endgame).
     ("KXCPI", "STABLE"), ("KXPPI", "STABLE"), ("KXCPICORE", "STABLE"),
