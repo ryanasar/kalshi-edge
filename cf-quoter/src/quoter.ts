@@ -49,6 +49,15 @@ interface State {
   atBest: number;
   bid: Leg | null;
   ask: Leg | null;
+  // SHADOW MODE (observational; NEVER drives orders). Position folded from the
+  // exchange fills feed, plus the authoritative position_fp, so we can measure
+  // drift between our INFERRED position and exchange truth on the live fleet
+  // before trusting a reconciled ledger to drive decisions. Step 2 of
+  // docs/design/position-correctness.md.
+  shadowPos: number;    // net YES position folded from the fills feed
+  shadowCash: number;   // cash folded from the fills feed (best-effort)
+  authPos: number;      // exchange authoritative position_fp
+  shadowTs: number;     // epoch ms of last successful reconcile (0 = never)
 }
 
 export interface StartConfig {
@@ -119,6 +128,7 @@ export class QuoterDO extends DurableObject<Env> {
       endTime: Date.now() + minutes * 60_000,
       running: true, stopReason: "",
       position: 0, cash: 0, fees: 0, fills: 0, cycles: 0, atBest: 0,
+      shadowPos: 0, shadowCash: 0, authPos: 0, shadowTs: 0,
       bid: null, ask: null,
     };
     await this.ctx.storage.put("state", s);
@@ -144,6 +154,16 @@ export class QuoterDO extends DurableObject<Env> {
       position: s.position, fills: s.fills, cycles: s.cycles, atBest: s.atBest,
       atBestPct: s.cycles ? Math.round((100 * s.atBest) / s.cycles) : 0,
       cash: +s.cash.toFixed(4), fees: +s.fees.toFixed(4),
+      // shadow-mode drift (observational). driftAuth ≈ 0 validates the fold;
+      // driftInferred is the actual bug metric: how far the OLD inferred
+      // position is from exchange truth.
+      // ?? 0 guards the schema migration: DOs already running when this deploys
+      // have persisted State without these fields; shadowReconcile backfills them
+      // on the first post-deploy alarm.
+      shadowPos: +(s.shadowPos ?? 0).toFixed(2), authPos: +(s.authPos ?? 0).toFixed(2),
+      driftAuth: +((s.shadowPos ?? 0) - (s.authPos ?? 0)).toFixed(2),
+      driftInferred: +(s.position - (s.authPos ?? 0)).toFixed(2),
+      shadowAgeSec: s.shadowTs ? Math.round((Date.now() - s.shadowTs) / 1000) : null,
       endsInMin: Math.max(0, Math.round((s.endTime - Date.now()) / 60_000)),
     };
   }
@@ -156,6 +176,7 @@ export class QuoterDO extends DurableObject<Env> {
     try {
       if (Date.now() >= s.endTime) { await this.doStop(s, "deadline"); return; }
       await this.detectFills(k, s);
+      await this.shadowReconcile(k, s);   // observational; self-isolated, never throws into the loop
       const q = await k.bestQuote(s.ticker);
       if (q.bid && q.ask) {
         const mid = (Number(q.bid) + Number(q.ask)) / 2;
@@ -206,6 +227,51 @@ export class QuoterDO extends DurableObject<Env> {
         this.recordFill(s, tag, o.price, o.rem); // gone & we didn't cancel -> filled
         s[tag] = null;
       }
+    }
+  }
+
+  // --- SHADOW MODE: reconcile against exchange truth, measure drift ----------
+  // Observational ONLY — never places, cancels, or changes any order. Folds this
+  // market's fills feed into a signed YES position and compares (a) that ledger
+  // position and (b) our INFERRED position against the exchange's authoritative
+  // position_fp. Re-folded from scratch each cycle, so it is idempotent by
+  // construction (no fill can be double-counted). Fully wrapped: any error is
+  // swallowed so shadow reconciliation can NEVER disturb the trading path.
+  // This is the safe first step (shadow before enforce) of
+  // docs/design/position-correctness.md — it produces the drift evidence the
+  // current inferred-position design cannot.
+  private async shadowReconcile(k: Kalshi, s: State): Promise<void> {
+    try {
+      const fills = await k.fills(s.ticker);
+      let pos = 0, cash = 0;
+      for (const f of fills) {
+        const n = Number(f.count_fp ?? 0);
+        const isBuy = f.action === "buy";
+        // Signed YES position, VALIDATED against position_fp on 4 live markets
+        // (buildperms −80, usretail −10, musknw −18.86, crunchwrap +10). The
+        // quoter only ever posts YES bids and YES asks, so every fill is
+        // action=buy (a YES bid → +YES) or action=sell (a YES ask, which Kalshi
+        // records as sell/no → −YES). Sign is a SINGLE factor — do NOT also
+        // multiply by outcome_side (it's collinear here, so that double-counts
+        // the sign; that was the bug caught in pre-deploy validation). Revisit
+        // if NO-side orders are ever added.
+        pos += (isBuy ? 1 : -1) * n;
+        cash += (isBuy ? -1 : 1) * n * Number(f.yes_price_dollars) - Number(f.fee_cost ?? 0);
+      }
+      s.shadowPos = pos;
+      s.shadowCash = cash;
+      s.authPos = await k.positionFp(s.ticker);
+      s.shadowTs = Date.now();
+      // Structured line for `wrangler tail` → drift history / metrics extraction.
+      console.log(JSON.stringify({
+        evt: "shadow_reconcile", ticker: s.ticker,
+        inferred: +s.position.toFixed(2), ledger: +pos.toFixed(2), auth: +s.authPos.toFixed(2),
+        drift_auth: +(pos - s.authPos).toFixed(2),          // ledger vs exchange — should be ~0 (validates fold)
+        drift_inferred: +(s.position - s.authPos).toFixed(2), // OLD inference vs exchange — the bug we're measuring
+        n_fills: fills.length,
+      }));
+    } catch (e) {
+      console.log(`shadow_reconcile error (${s.ticker}): ${(e as Error).message}`);
     }
   }
 

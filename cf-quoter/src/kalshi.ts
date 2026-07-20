@@ -93,6 +93,30 @@ export class Kalshi {
     return (d.market_positions ?? []).filter((p: any) => p.ticker === ticker);
   }
 
+  /** SHADOW: the exchange's authoritative net YES position for a market. Read the
+   *  `position_fp` STRING (§8) — `position` is lossy and doesn't exist here. */
+  async positionFp(ticker: string): Promise<number> {
+    const ps = await this.positions(ticker);
+    return ps.length ? Number(ps[0].position_fp ?? 0) : 0;
+  }
+
+  /** SHADOW: every fill for a market (paginated via cursor). The fills feed is
+   *  the authoritative source of truth for reconciliation; each fill carries a
+   *  unique `fill_id` (the exactly-once idempotency key). */
+  async fills(ticker: string): Promise<any[]> {
+    const out: any[] = [];
+    let cursor = "";
+    for (let i = 0; i < 20; i++) {          // safety cap: 20×200 = 4000 fills
+      const q = new URLSearchParams({ ticker, limit: "200" });
+      if (cursor) q.set("cursor", cursor);
+      const d = await this.json("GET", `/portfolio/fills?${q.toString()}`);
+      out.push(...(d.fills ?? []));
+      cursor = d.cursor ?? "";
+      if (!cursor) break;
+    }
+    return out;
+  }
+
   // --- writes -------------------------------------------------------------
   /** Rest a limit order. side 'bid'=buy YES, 'ask'=sell YES. Returns order_id. */
   async restLimit(
