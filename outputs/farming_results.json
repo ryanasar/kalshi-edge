@@ -97,5 +97,22 @@
         "tox": "STABLE",
         "price": 0.9,
         "note": "C reading noisy/likely overstated"
+    },
+    {
+        "cycle": "2026-07-19-run2",
+        "ticker": "KXTBCRUNCHWRAP-26AUG02-T6.69",
+        "pool": 1000,
+        "size": 15,
+        "maxPos": 30,
+        "C": null,
+        "presence": 1.0,
+        "position_final": 0,
+        "fills": 21,
+        "trading_pnl": 1.22,
+        "payout": 3.19,
+        "take_pct": 0.32,
+        "tox": "STABLE",
+        "price": 0.48,
+        "note": "First run-2 payout (Jul 21). Accumulated inventory (peaked ~+30) but ended FLAT on deadline; AUTHORITATIVE realized trading P&L +$1.22 vs DO inferred cash -$3.30 (off ~$4.5 \u2014 the inferred-cash drift the position-correctness ledger fixes). Low take 0.32% on $1000 pool despite 100% presence. Net ~+$4.4 with subsidy. Config (size/maxPos) approx."
     }
 ]
