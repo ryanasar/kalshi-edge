@@ -21,7 +21,7 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
-import { Kalshi, fp } from "./kalshi";
+import { Kalshi, fp, type Quote } from "./kalshi";
 import type { Env } from "./index";
 
 const MAKER_RATE = 0.0175;
@@ -30,6 +30,13 @@ const MAKER_RATE = 0.0175;
 // instead of pinning at the cap (§ v2 learnings — the USPPIYOY pin).
 const SKEW_SOFT_FRAC = 0.6;
 const TICK = 0.01;
+// Auto-unpin guardrail (docs/design/auto-unpin.md, INV-PIN): when inventory
+// sticks at the cap and the reducing side won't fill passively, cross the spread
+// to shed risk; after repeated failures, flatten + stop. Turns the manual
+// "notice the pin and flatten" incident into an enforced invariant.
+const PIN_FRAC = 0.9;          // pinned when |pos| >= 0.9 * maxPosition
+const PIN_PATIENCE = 10;       // stuck cycles (~2 min @ 12s poll) before the first shed
+const SHED_MAX_ATTEMPTS = 3;   // crosses before escalating to flatten + stop
 
 interface Leg { id: string; price: string; rem: number; }
 interface State {
@@ -58,6 +65,9 @@ interface State {
   shadowCash: number;   // cash folded from the fills feed (best-effort)
   authPos: number;      // exchange authoritative position_fp
   shadowTs: number;     // epoch ms of last successful reconcile (0 = never)
+  // Auto-unpin guardrail state (docs/design/auto-unpin.md).
+  pinnedCycles: number; // consecutive cycles stuck at/above the pin threshold
+  shedAttempts: number; // cross-the-spread shed attempts this pin episode
 }
 
 export interface StartConfig {
@@ -129,6 +139,7 @@ export class QuoterDO extends DurableObject<Env> {
       running: true, stopReason: "",
       position: 0, cash: 0, fees: 0, fills: 0, cycles: 0, atBest: 0,
       shadowPos: 0, shadowCash: 0, authPos: 0, shadowTs: 0,
+      pinnedCycles: 0, shedAttempts: 0,
       bid: null, ask: null,
     };
     await this.ctx.storage.put("state", s);
@@ -164,6 +175,7 @@ export class QuoterDO extends DurableObject<Env> {
       driftAuth: +((s.shadowPos ?? 0) - (s.authPos ?? 0)).toFixed(2),
       driftInferred: +(s.position - (s.authPos ?? 0)).toFixed(2),
       shadowAgeSec: s.shadowTs ? Math.round((Date.now() - s.shadowTs) / 1000) : null,
+      pinnedCycles: s.pinnedCycles ?? 0, shedAttempts: s.shedAttempts ?? 0,
       endsInMin: Math.max(0, Math.round((s.endTime - Date.now()) / 60_000)),
     };
   }
@@ -184,6 +196,15 @@ export class QuoterDO extends DurableObject<Env> {
         s.cycles++;
         if (s.bid && s.ask && fp(s.bid.price) === fp(q.bid) && fp(s.ask.price) === fp(q.ask)) s.atBest++;
         if (pnl <= -s.maxLoss) { await this.doStop(s, `killswitch pnl=${pnl.toFixed(2)}`); return; }
+        // Auto-unpin: if stuck at the cap with the reducing side not filling,
+        // cross the spread to shed risk (or, after repeated failures, flatten +
+        // stop). If it acts, skip normal requoting this cycle to let it settle.
+        if (await this.maybeUnpin(k, s, q)) {
+          if (!s.running) return;                    // escalated to flatten + stop
+          await this.ctx.storage.put("state", s);
+          await this.ctx.storage.setAlarm(Date.now() + s.pollSeconds * 1000);
+          return;
+        }
         // Position-skew the PRICES. Below the soft threshold both sides sit at
         // best (symmetric — capture spread + subsidy). Past it, improve the
         // reducing side by one tick to become the new best there, so it gets
@@ -301,6 +322,66 @@ export class QuoterDO extends DurableObject<Env> {
     } catch (e) {
       console.log(`skip ${tag}@${price}: ${(e as Error).message}`); // post_only rejected a racing quote
     }
+  }
+
+  // --- AUTO-UNPIN GUARDRAIL (docs/design/auto-unpin.md, INV-PIN) -----------
+  // Returns true iff it took a remediation action this cycle (a shed or an
+  // escalate), in which case the caller skips normal requoting. Only ever
+  // REDUCES risk — the shed is always in the reducing direction, so it can move
+  // toward flat but never breach the cap.
+  private async maybeUnpin(k: Kalshi, s: State, q: Quote): Promise<boolean> {
+    const cap = s.maxPosition;
+    // DETECT on the AUTHORITATIVE position (shadowReconcile refreshes s.authPos
+    // every cycle). Keying off the inferred s.position could over-shed, because
+    // detectFills doesn't track the taker shed, so the inferred value goes stale.
+    if (Math.abs(s.authPos ?? 0) < cap * PIN_FRAC) {   // not pinned → healthy, reset
+      s.pinnedCycles = 0;
+      s.shedAttempts = 0;
+      return false;
+    }
+    s.pinnedCycles = (s.pinnedCycles ?? 0) + 1;
+    if (s.pinnedCycles < PIN_PATIENCE) return false;   // give passive skew its chance first
+
+    // Repeated crosses couldn't unpin us → the market is untradeable (thin book,
+    // no counterparty on the reducing side). Flatten + stop, freeing the capital.
+    if ((s.shedAttempts ?? 0) >= SHED_MAX_ATTEMPTS) {
+      console.log(JSON.stringify({ evt: "unpin_escalate", ticker: s.ticker,
+        authPos: s.authPos, shedAttempts: s.shedAttempts }));
+      await this.doStop(s, "pin-unrecoverable");
+      return true;
+    }
+
+    // Confirm the pin on a FRESH authoritative read before crossing, so a stale
+    // count can never make us over-shed past flat into opposite inventory. Also
+    // re-syncs the inferred position to truth while we hold it.
+    let pos: number;
+    try { pos = await k.positionFp(s.ticker); }
+    catch { return false; }                            // can't confirm truth → don't cross this cycle
+    s.position = pos;
+    if (Math.abs(pos) < cap * PIN_FRAC) { s.pinnedCycles = 0; return false; }  // already unpinned
+
+    // Cross the spread to shed `size` contracts in the reducing direction. This
+    // only needs to drop |pos| below the pin threshold so two-sided quoting can
+    // resume — not to flat. The deliberate "pay a small taker cost to shed risk".
+    const reduceSide: "bid" | "ask" = pos > 0 ? "ask" : "bid";
+    const touch = reduceSide === "ask" ? q.bid : q.ask;
+    if (!touch) return false;   // one-sided book: can't cross this cycle; deadline backstops
+    const px = reduceSide === "ask"
+      ? fp(Math.max(Number(touch) - 0.02, 0.01))     // sell through the bid
+      : fp(Math.min(Number(touch) + 0.02, 0.99));    // buy through the ask
+    const n = Math.min(s.size, Math.abs(pos));
+
+    // Cancel our resting quotes first so the shed doesn't fight our own orders.
+    for (const o of await this.myOrders(k, s.ticker)) await k.cancel(o.order_id ?? o.id).catch(() => {});
+    s.bid = s.ask = null;
+
+    console.log(JSON.stringify({ evt: "unpin_shed", ticker: s.ticker, position: pos,
+      side: reduceSide, n, px, attempt: (s.shedAttempts ?? 0) + 1 }));
+    await k.restLimit(s.ticker, reduceSide, px, n, false)   // post_only=false → taker, crosses
+      .catch((e) => console.log(`shed failed (${s.ticker}): ${(e as Error).message}`));
+    s.shedAttempts = (s.shedAttempts ?? 0) + 1;
+    s.pinnedCycles = 0;   // reset patience; subsequent cycles detect if the shed unpinned us
+    return true;
   }
 
   // --- stop + flatten (runs on manual stop, deadline, and kill) -----------
