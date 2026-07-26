@@ -107,6 +107,13 @@ _TOX_RULES: list[tuple[str, str]] = [
     # same-day weather / air-quality: resolves against a live sensor reading
     ("KXTEMP", "LIVE"), ("KXHIGH", "LIVE"), ("TEMPERATURE IN", "LIVE"),
     ("KXAQICITY", "LIVE"), ("AQI", "LIVE"), ("AIR QUALITY", "LIVE"),
+    # RAINFALL — same family as TEMP/AQI (live sensor) but ALSO an accumulating
+    # monthly total, so it ratchets one way all month: the §5f drift shape twice
+    # over. These swept the top of the allocator once the sports markets were
+    # demoted, which is exactly how a classifier gap presents itself — the money
+    # flows to whatever is still mis-tiered.
+    ("KXRAIN", "LIVE"), ("RAINFALL", "LIVE"), ("INCHES OF RAIN", "LIVE"),
+    ("PRECIPITATION", "LIVE"), ("RAIN IN", "LIVE"),
     # discrete reveal / result-announcement jumps (one big step when it lands)
     ("KXWCATTEND", "EVENT"), ("ATTEND", "EVENT"), ("KXWCADS", "EVENT"),
     ("ADVERTISE", "EVENT"), ("HURCAT", "EVENT"), ("CATEGORY", "EVENT"),
@@ -131,15 +138,54 @@ _TOX_RULES: list[tuple[str, str]] = [
     ("PHOTOGRAPHED", "EVENT"), ("PRESIDENTIAL ACTION", "EVENT"),
     ("KXTRUMPACT", "EVENT"), ("KXTRUMPENDORSE", "EVENT"), ("KXTRUTHSOCIAL", "EVENT"),
     ("KXTRUMPPHOTO", "EVENT"), ("KXTRUMPMENTION", "EVENT"), ("KXTRUMPTRUTH", "EVENT"),
+    # UNSCHEDULED-ANNOUNCEMENT markets (§5f, generalized): "where will X go next",
+    # next-team/next-club/next-manager, magazine covers, "will X ever play again",
+    # legislative votes. These LOOK stable — flat for days, tight book, thin side —
+    # and the allocator loved them (they swept the top of the Jul 25 screen). But
+    # the §5f rule is flat until ONE **SCHEDULED** release; an announcement lands
+    # at an UNKNOWN time, so we cannot pull the quote before it and get gapped
+    # through by whoever sees the news first. Worse than drift: drift bleeds, a gap
+    # takes the whole position at once. Match tickers AND title phrasings.
+    ("KXNEXTTEAM", "EVENT"), ("KXJOINCLUB", "EVENT"), ("KXJOINLEAGUE", "EVENT"),
+    ("KXNEXTMANAGER", "EVENT"), ("KXINTLPLAYAGAIN", "EVENT"),
+    ("NEXT TEAM", "EVENT"), ("NEXT CLUB", "EVENT"), ("GO NEXT", "EVENT"),
+    ("NEXT MANAGER", "EVENT"), ("EVER PLAY", "EVENT"), ("NEXT CONTRACT", "EVENT"),
+    ("OUT BY DATE", "EVENT"), ("FIRST TO ANNOUNCE", "EVENT"), ("ANNOUNCE", "EVENT"),
+    ("KXMEDIACOVERSI", "EVENT"), ("KXVOGUECOVER", "EVENT"), ("ON THE COVER", "EVENT"),
+    ("KXCLARITYVOTE", "EVENT"), ("SENATE VOTE", "EVENT"), ("VOTE ON", "EVENT"),
+    # NET WORTH is NOT stable — it tracks the underlying equity tick by tick
+    # (KXMUSKNW ≈ TSLA). Previously mis-tiered STABLE; it cost a realized
+    # -$5.70 on KXMUSKNW-26JUL31-T750 and was one of the pins we had to cross
+    # the spread to flatten. Demoted on measured evidence.
+    ("NET WORTH", "EVENT"), ("KXMUSKNW", "EVENT"),
     # scheduled macro/data prints — flat until a known release time (farmable;
     # the resolution-proximity multiplier separately haircuts the endgame).
     ("KXCPI", "STABLE"), ("KXPPI", "STABLE"), ("KXCPICORE", "STABLE"),
-    ("CPI", "STABLE"), ("PPI", "STABLE"), ("GAS PRICE", "STABLE"),
-    ("KXAAAGASD", "STABLE"), ("HOME SALES", "STABLE"), ("HOUSING START", "STABLE"),
+    ("CPI", "STABLE"), ("PPI", "STABLE"),
+    ("HOME SALES", "STABLE"), ("HOUSING START", "STABLE"),
     ("BUILDING PERMIT", "STABLE"), ("TREASURY YIELD", "STABLE"),
     ("RETAIL SALES", "STABLE"), ("JOBLESS", "STABLE"), ("UNEMPLOYMENT", "STABLE"),
-    ("PRICE IN JULY", "STABLE"), ("HOURLY PRICE", "STABLE"), ("NET WORTH", "STABLE"),
+    ("PRICE IN JULY", "STABLE"), ("HOURLY PRICE", "STABLE"),
     ("FEAR & GREED", "STABLE"),
+    # AAA gas averages track a CONTINUOUSLY-UPDATING national spot average, and
+    # the monthly variant (KXAAAGASM) is an ACCUMULATING mean — both are the §5f
+    # drift shape, not a scheduled print. Only the BLS gasoline CPI (matched
+    # STABLE above) is a true scheduled release. Demoted STABLE → EVENT: §5f says
+    # spot-referenced is toxic, and MILD (0.65) still left it near the top of the
+    # allocator, so the haircut has to actually bite.
+    ("KXAAAGASM", "EVENT"), ("KXAAAGASD", "EVENT"), ("GAS PRICE", "EVENT"),
+    # GPU compute pricing splits three ways and only ONE is farmable:
+    #   *MS (monthly average, FAR-dated) — proven clean: 0 fills, 100% at-best,
+    #     paid $2.89–$4.24 per $250 pool. Left MILD (falls through) = farmable.
+    #   *WS (weekly spot) — §5f proven toxic: KXA100WS killswitched at −40.
+    #   *MON / *MAX (spot on a date / running max by a date) — spot-referenced and
+    #     one-way ratcheting, never a scheduled print.
+    ("KXA100WS", "EVENT"), ("KXH100WS", "EVENT"), ("KXH200WS", "EVENT"),
+    ("KXB200WS", "EVENT"), ("KXRTX5090WS", "EVENT"),
+    ("KXA100MON", "EVENT"), ("KXH100MON", "EVENT"), ("KXH200MON", "EVENT"),
+    ("KXB200MON", "EVENT"), ("KXRTX5090MON", "EVENT"),
+    ("KXA100MAX", "EVENT"), ("KXH100MAX", "EVENT"), ("KXH200MAX", "EVENT"),
+    ("KXB200MAX", "EVENT"), ("KXRTX5090MAX", "EVENT"),
     # DRIFTING markets (§5f) — continuously reprice with live/accumulating data,
     # so a resting quote gets trend-run-over (market-making death). Treat as toxic.
     ("KXUSFLYCAN", "EVENT"), ("CANCELLATIONS", "EVENT"), ("KXBTCVSGOLD", "EVENT"),
