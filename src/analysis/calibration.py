@@ -4,10 +4,14 @@ src/analysis/calibration.py
 Computes the Kalshi market's calibration curve — THE flagship chart of
 this project — for every settled MLB Tier 1 market.
 
-Pulls the (market_implied_prob_at_close, realized_outcome) pair for each
-market, bins them by predicted probability, and plots empirical realized
-frequency against predicted probability with per-bin Wilson-score 95% CIs.
-Also computes and prints the Brier score.
+Pulls the (market_implied_prob_at_first_pitch, realized_outcome) pair for
+each market, bins them by predicted probability, and plots empirical
+realized frequency against predicted probability with per-bin Wilson-score
+95% CIs. Also computes and prints the Brier score.
+
+NOTE: "at first pitch" is load-bearing. Sampling the price at market close
+(≈ game end) is lookahead — the price has already resolved to ~0/1 — and
+inflates calibration into a meaningless ~0.05 Brier. See CALIBRATION_SQL.
 
 Note: this measures the MARKET's calibration, not our model's. It answers
 the question "is Kalshi's aggregate well-calibrated on MLB markets?"
@@ -64,13 +68,22 @@ SELECT
     c.yes_ask_close - c.yes_bid_close         AS spread
 FROM markets m
 
--- Latest candle at or before close_time: point-in-time correct
--- "implied probability at the moment trading stopped."
+-- Link each market to its game so we can sample at FIRST PITCH, not at
+-- close. A game market's close_time is ~3h after first pitch (i.e. game
+-- END), by which point the price has already converged to ~0/1. Sampling
+-- there is lookahead and yields an absurd ~0.05-0.07 "market Brier" — the
+-- corner-concentration artifact (§2/§8). First pitch (raw->>'gameDate') is
+-- the honest pre-game forecast horizon: the sports-betting closing line.
+JOIN market_game_link l ON l.ticker = m.ticker
+JOIN games g ON g.game_pk = l.game_pk
+
+-- Latest candle at or before first pitch: point-in-time correct
+-- "implied probability the moment before the game started."
 JOIN LATERAL (
     SELECT yes_bid_close, yes_ask_close
     FROM market_candles
     WHERE ticker = m.ticker
-      AND end_period_ts <= m.close_time
+      AND end_period_ts <= (g.raw->>'gameDate')::timestamptz
     ORDER BY end_period_ts DESC
     LIMIT 1
 ) c ON TRUE

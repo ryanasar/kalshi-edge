@@ -52,11 +52,13 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, StandardScaler
 
 from src.analysis.calibration import brier_score, compute_bins, plot_calibration
+from src.features.game_features import PER_SIDE_KEYS
 
-# Must match src.features.game_features.FEATURE_KEYS and column order.
-FEATURE_KEYS = ["k_pct", "bb_pct", "hr_per_9", "xwoba_bip", "avg_velo"]
-RAW_COLUMNS = [f"home_{k}" for k in FEATURE_KEYS] + [f"away_{k}" for k in FEATURE_KEYS]
-DIFF_NAMES = [f"diff_{k}" for k in FEATURE_KEYS]
+# Single source of truth for feature names + order comes from the assembler.
+# Raw columns are all home_* then all away_* (matching OUTPUT_COLUMNS), so
+# the differential transform can split at the midpoint.
+RAW_COLUMNS = [f"home_{k}" for k in PER_SIDE_KEYS] + [f"away_{k}" for k in PER_SIDE_KEYS]
+DIFF_NAMES = [f"diff_{k}" for k in PER_SIDE_KEYS]
 
 # C = 1/λ. Small C = strong regularization. Season-forward CV picks one.
 C_GRID = np.logspace(-3, 2, 11)
@@ -113,11 +115,12 @@ def load_features(path: str) -> dict:
 
 
 def _home_minus_away(X):
-    """Collapse the 10 raw columns (home 0-4, away 5-9) into 5 home−away
-    differentials. Module-level (not a lambda) so the pipeline stays
-    picklable."""
+    """Collapse the raw per-side columns (all home, then all away) into
+    home−away differentials by splitting at the midpoint. Module-level (not
+    a lambda) so the pipeline stays picklable."""
     X = np.asarray(X, dtype=float)
-    return X[:, :5] - X[:, 5:]
+    half = X.shape[1] // 2
+    return X[:, :half] - X[:, half:]
 
 
 def build_pipeline(C: float) -> Pipeline:
