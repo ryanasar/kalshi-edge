@@ -30,10 +30,26 @@ export interface Env {
 const ok = (b: unknown) => Response.json(b);
 const err = (m: string, s = 400) => Response.json({ error: m }, { status: s });
 
+// Constant-time token check: `!==` returns at the first mismatched byte, which
+// leaks how much of a guess was right through response timing. Compare SHA-256
+// digests so the lengths always match (timingSafeEqual requires equal length).
+async function authorized(req: Request, token: string): Promise<boolean> {
+  const enc = new TextEncoder();
+  const [a, b] = await Promise.all([
+    crypto.subtle.digest("SHA-256", enc.encode(req.headers.get("authorization") ?? "")),
+    crypto.subtle.digest("SHA-256", enc.encode(`Bearer ${token}`)),
+  ]);
+  return crypto.subtle.timingSafeEqual(a, b);
+}
+
+// A stop that's still closing inventory stays in the registry; the QuoterDO
+// removes itself once position_fp reads flat (or flattening gives up).
+const stillFlattening = (res: unknown) => (res as { flattening?: boolean })?.flattening === true;
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
-    if (req.headers.get("authorization") !== `Bearer ${env.CONTROL_TOKEN}`) {
+    if (!(await authorized(req, env.CONTROL_TOKEN))) {
       return err("unauthorized", 401);
     }
     const registry = env.REGISTRY.getByName("registry");
@@ -67,9 +83,16 @@ export default {
       if (url.pathname === "/start" && req.method === "POST") {
         const cfg = (await req.json()) as StartConfig;
         if (!cfg?.ticker) return err("ticker required");
-        const res = await quoter(cfg.ticker).start(cfg);
+        // Register BEFORE starting: if we crashed between a successful start and
+        // the add, a live quoter would be invisible to /status and /stop-all.
+        // Registered-but-not-started is the harmless failure; undo it on refusal.
         await registry.add(cfg.ticker);
-        return ok(res);
+        try {
+          return ok(await quoter(cfg.ticker).start(cfg));
+        } catch (e) {
+          await registry.remove(cfg.ticker);
+          throw e;
+        }
       }
 
       if (url.pathname === "/stop" && req.method === "POST") {
@@ -77,7 +100,7 @@ export default {
         const ticker = body.ticker ?? url.searchParams.get("ticker") ?? "";
         if (!ticker) return err("ticker required (body.ticker or ?ticker=)");
         const res = await quoter(ticker).stop();
-        await registry.remove(ticker);
+        if (!stillFlattening(res)) await registry.remove(ticker);
         return ok(res);
       }
 
@@ -86,7 +109,7 @@ export default {
         const stopped = await Promise.all(
           tickers.map(async (t) => {
             const res = await quoter(t).stop();
-            await registry.remove(t);
+            if (!stillFlattening(res)) await registry.remove(t);
             return { ticker: t, ...(res as object) };
           }),
         );

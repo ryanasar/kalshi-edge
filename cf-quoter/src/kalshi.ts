@@ -29,7 +29,21 @@ export async function importPrivateKey(b64Der: string): Promise<CryptoKey> {
   );
 }
 
-export interface Quote { bid: string | null; ask: string | null; }
+/** Top of book. Sizes are the resting size AT the best price (incl. our own
+ *  order, if we're there); null when the exchange didn't report them. */
+export interface Quote {
+  bid: string | null; ask: string | null;
+  bidSize: number | null; askSize: number | null;
+}
+
+const PAGE = 200;
+
+/** The exchange answered with a non-2xx status. A 4xx is a DEFINITE rejection
+ *  (the order was not placed); anything else that throws — a network error, a
+ *  timeout, a 5xx — is AMBIGUOUS: the order may or may not exist. */
+export class KalshiHttpError extends Error {
+  constructor(message: string, public status: number) { super(message); }
+}
 
 export class Kalshi {
   constructor(private keyId: string, private key: CryptoKey) {}
@@ -70,7 +84,7 @@ export class Kalshi {
 
   private async json(method: string, endpoint: string, body?: unknown): Promise<any> {
     const r = await this.request(method, endpoint, body);
-    if (!r.ok) throw new Error(`${method} ${endpoint} [${r.status}]: ${await r.text()}`);
+    if (!r.ok) throw new KalshiHttpError(`${method} ${endpoint} [${r.status}]: ${await r.text()}`, r.status);
     return r.json();
   }
 
@@ -81,16 +95,52 @@ export class Kalshi {
 
   async bestQuote(ticker: string): Promise<Quote> {
     const m = (await this.json("GET", `/markets/${ticker}`)).market ?? {};
-    return { bid: m.yes_bid_dollars ?? null, ask: m.yes_ask_dollars ?? null };
+    const size = (x: unknown) => (x == null || x === "" ? null : Number(x));
+    return {
+      bid: m.yes_bid_dollars ?? null, ask: m.yes_ask_dollars ?? null,
+      bidSize: size(m.yes_bid_size_fp), askSize: size(m.yes_ask_size_fp),
+    };
   }
 
-  async restingOrders(): Promise<any[]> {
-    return (await this.json("GET", "/portfolio/orders?status=resting&limit=100")).orders ?? [];
+  /** Follow `cursor` across pages. Returns the rows and whether `maxPages` ran
+   *  out with more still available — callers must not mistake a truncated list
+   *  for the whole set (a missing order reads as "gone" = a phantom fill). */
+  private async paged(endpoint: string, params: Record<string, string>, key: string,
+                      maxPages: number): Promise<{ rows: any[]; truncated: boolean }> {
+    const rows: any[] = [];
+    let cursor = "";
+    for (let i = 0; i < maxPages; i++) {
+      const q = new URLSearchParams({ ...params, limit: String(PAGE) });
+      if (cursor) q.set("cursor", cursor);
+      const d = await this.json("GET", `${endpoint}?${q.toString()}`);
+      rows.push(...(d[key] ?? []));
+      cursor = d.cursor ?? "";
+      if (!cursor) return { rows, truncated: false };
+    }
+    return { rows, truncated: true };
+  }
+
+  /** Resting orders, paginated — scoped to one market when `ticker` is given.
+   *  (The old single `limit=100` page was account-wide: past 100 resting orders
+   *  our legs fell off the list and detectFills booked them as fills.) */
+  async restingOrders(ticker?: string): Promise<any[]> {
+    const params: Record<string, string> = { status: "resting" };
+    if (ticker) params.ticker = ticker;
+    const { rows, truncated } = await this.paged("/portfolio/orders", params, "orders", 10);
+    if (truncated) throw new Error(`resting-order list truncated (${rows.length}+)`);
+    return rows;
+  }
+
+  /** Recent orders for a market in ANY status (resting/executed/canceled), so a
+   *  leg that left the resting list can be resolved by what actually happened
+   *  to it instead of assumed filled. Newest first; a few pages is plenty. */
+  async orders(ticker: string): Promise<any[]> {
+    return (await this.paged("/portfolio/orders", { ticker }, "orders", 5)).rows;
   }
 
   async positions(ticker: string): Promise<any[]> {
-    const d = await this.json("GET", "/portfolio/positions?limit=100");
-    return (d.market_positions ?? []).filter((p: any) => p.ticker === ticker);
+    const { rows } = await this.paged("/portfolio/positions", { ticker }, "market_positions", 5);
+    return rows.filter((p: any) => p.ticker === ticker);
   }
 
   /** SHADOW: the exchange's authoritative net YES position for a market. Read the
@@ -103,25 +153,21 @@ export class Kalshi {
   /** SHADOW: every fill for a market (paginated via cursor). The fills feed is
    *  the authoritative source of truth for reconciliation; each fill carries a
    *  unique `fill_id` (the exactly-once idempotency key). */
-  async fills(ticker: string): Promise<any[]> {
-    const out: any[] = [];
-    let cursor = "";
-    for (let i = 0; i < 20; i++) {          // safety cap: 20×200 = 4000 fills
-      const q = new URLSearchParams({ ticker, limit: "200" });
-      if (cursor) q.set("cursor", cursor);
-      const d = await this.json("GET", `/portfolio/fills?${q.toString()}`);
-      out.push(...(d.fills ?? []));
-      cursor = d.cursor ?? "";
-      if (!cursor) break;
-    }
-    return out;
+  async fills(ticker: string): Promise<{ fills: any[]; truncated: boolean }> {
+    // safety cap: 20×200 = 4000 fills. Truncation is REPORTED, not hidden — a
+    // partial fold would silently give a wrong shadow position.
+    const { rows, truncated } = await this.paged("/portfolio/fills", { ticker }, "fills", 20);
+    return { fills: rows, truncated };
   }
 
   // --- writes -------------------------------------------------------------
-  /** Rest a limit order. side 'bid'=buy YES, 'ask'=sell YES. Returns order_id. */
+  /** Rest a limit order. side 'bid'=buy YES, 'ask'=sell YES. Returns order_id.
+   *  `clientOrderId` is the idempotency key: callers that must not double-place
+   *  generate it up front and persist it BEFORE calling, so a lost ack can be
+   *  resolved by looking the order up by this id instead of placing again. */
   async restLimit(
     ticker: string, side: "bid" | "ask", price: string, count: number,
-    postOnly = true,
+    postOnly = true, clientOrderId: string = crypto.randomUUID(),
   ): Promise<string> {
     const body = {
       ticker,
@@ -131,7 +177,7 @@ export class Kalshi {
       time_in_force: "good_till_canceled",
       self_trade_prevention_type: "taker_at_cross",
       post_only: postOnly,
-      client_order_id: crypto.randomUUID(),
+      client_order_id: clientOrderId,
     };
     const d = await this.json("POST", "/portfolio/events/orders", body);
     return (d.order ?? d).order_id;

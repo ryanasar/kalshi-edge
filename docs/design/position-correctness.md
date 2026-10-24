@@ -287,6 +287,29 @@ thing the current system cannot produce.
    Gate: no missed fills, no double-placements, drift alert clean for N days.
 4. **Fleet rollout**, then **snapshotting/compaction**.
 
+### Progress (2026-10-24)
+
+Interim fixes that shipped ahead of the full ledger. They narrow the §1 failure
+modes but do not replace INV-1–5. Each one is covered by `cf-quoter/test/`
+(`npm test`), and each test fails on the pre-fix code.
+
+- **Double placement (§1):** the client_order_id is written ahead and persisted
+  before the POST. A 4xx is a definite reject; a network error, timeout or 5xx is
+  ambiguous, so the leg stays pending and is resolved by coid against orders in
+  **any status**. Checking only resting orders missed a pending order that filled
+  within one poll: its fills were dropped and the quoter quoted again on top.
+- **Phantom fills (§1):** a leg that leaves the resting list is reconciled
+  against the exchange's own `fill_count_fp`. An exchange cancel, expiry or STP
+  removal is no longer booked as a full fill. "Gone ⇒ filled" remains only as a
+  fallback when the order record isn't found.
+- **Stop/flatten:** a stop now flattens the authoritative `position_fp`, not the
+  inferred position. It re-checks every cycle until flat, with a bound of 5
+  attempts, and then gives up loudly with nothing left resting.
+- **Truncated lists:** order and position reads follow `cursor` and are scoped
+  by `ticker`. A resting list that hits the page cap throws rather than being
+  treated as complete. A truncated fills feed is flagged (`shadowTruncated`)
+  instead of being folded into a wrong shadow position.
+
 ## 13. Milestones
 
 1. Exchange-semantics spike (§11).

@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
-    "tail": "wrangler tail"
+    "tail": "wrangler tail",
+    "test": "node test/run.mjs",
+    "check": "tsc --noEmit && node test/run.mjs"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260710.1",

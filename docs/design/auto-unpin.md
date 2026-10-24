@@ -97,6 +97,16 @@ one does.
   wouldn't help — this is the honest floor.
 - Crossing the spread realizes a small loss by design; that's the point (shed
   uncompensated risk you're no longer paid to hold).
+- **Shed accounting (fixed 2026-10-24).** The shed was originally fire-and-forget:
+  its taker fill never reached the inferred position, and on a thin book the
+  unfilled remainder rested GTC at its aggressive price, untracked. The shed now
+  goes into a tracked `shed` slot. The next cycle's `detectFills` books its fills
+  (at the limit price, which is conservative) and cancels any remainder, so the
+  order lives for one cycle.
+- **Escalation flattens truth (fixed 2026-10-24).** `doStop` used to flatten the
+  inferred position, which was stale after a shed. With a +20 pin and a 4-lot
+  partial shed, it sold 20 against a true 16 and ended **short 4**. It now runs a
+  verified flatten against `position_fp` (see position-correctness.md).
 
 ## 7. Observability
 
